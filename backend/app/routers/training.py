@@ -1,16 +1,7 @@
-"""RunPod training endpoints.
-
-Flow:
-  1. POST /start     — build dataset payload, submit to RunPod serverless, create TrainingJob row
-  2. GET  /jobs      — list jobs for the project
-  3. GET  /jobs/{id} — poll status (syncs RunPod status into DB on each call)
-  4. POST /jobs/{id}/cancel — request cancellation from RunPod
-  5. GET  /jobs/{id}/download — stream completed adapter weights to browser
-  6. GET  /runpod/status — connectivity / health check
-  7. GET  /gpu-types  — available GPU types (for UI dropdowns)
-"""
+"""Training endpoints — supports local (Unsloth) and RunPod (serverless) providers."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -25,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import models, schemas
 from ..config import EXPORT_DIR
 from ..database import get_session
-from ..export import export_dataset
 from ..runpod_client import cancel_job, health_check, job_status, list_gpu_types, submit_job
 from ..serialize import load_json
 
@@ -50,10 +40,9 @@ def _job_out(j: models.TrainingJob) -> schemas.TrainingJobOut:
     )
 
 
-async def _build_dataset_b64(project_id: str, db: AsyncSession,
-                              cfg: schemas.TrainingConfig) -> tuple[str, int]:
-    """Export approved samples in-memory and return base64-encoded JSONL."""
-    project = await db.get(models.Project, project_id)
+async def _build_dataset(project_id: str, db: AsyncSession,
+                         cfg: schemas.TrainingConfig) -> tuple[str, int]:
+    """Return (jsonl_text, sample_count)."""
     result = await db.execute(
         select(models.Sample)
         .join(models.Chunk, models.Sample.chunk_id == models.Chunk.id)
@@ -66,15 +55,20 @@ async def _build_dataset_b64(project_id: str, db: AsyncSession,
         raise HTTPException(400, "No samples match the selected statuses — approve some first.")
 
     from ..export import FORMATTERS
-    fmt = cfg.dataset_format
-    formatter = FORMATTERS.get(fmt)
+    formatter = FORMATTERS.get(cfg.dataset_format)
     if not formatter:
-        raise HTTPException(400, f"Unknown dataset format: {fmt}")
+        raise HTTPException(400, f"Unknown dataset format: {cfg.dataset_format}")
 
     lines = [json.dumps(formatter(s), ensure_ascii=False) for s in samples]
-    content = "\n".join(lines) + "\n"
-    b64 = base64.b64encode(content.encode()).decode()
-    return b64, len(samples)
+    return "\n".join(lines) + "\n", len(samples)
+
+
+# ── Local (Unsloth) status ───────────────────────────────────────────────────
+
+@router.get("/local-status", response_model=schemas.LocalStatusOut)
+async def local_status(project_id: str):
+    from ..local_trainer import check_unsloth
+    return schemas.LocalStatusOut(**check_unsloth())
 
 
 # ── RunPod connectivity ──────────────────────────────────────────────────────
@@ -93,8 +87,7 @@ async def runpod_status(project_id: str):
 @router.get("/gpu-types")
 async def gpu_types(project_id: str):
     try:
-        types = await list_gpu_types()
-        return {"gpu_types": types}
+        return {"gpu_types": await list_gpu_types()}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(503, str(exc))
 
@@ -118,25 +111,49 @@ async def start_training(project_id: str, cfg: schemas.TrainingConfig,
     if not project:
         raise HTTPException(404, "Project not found")
 
-    dataset_b64, sample_count = await _build_dataset_b64(project_id, db, cfg)
+    jsonl_text, sample_count = await _build_dataset(project_id, db, cfg)
 
+    if cfg.provider == "local":
+        return await _start_local(project_id, cfg, jsonl_text, sample_count, db)
+    else:
+        return await _start_runpod(project_id, cfg, jsonl_text, sample_count, db)
+
+
+async def _start_local(project_id: str, cfg: schemas.TrainingConfig,
+                       jsonl_text: str, sample_count: int,
+                       db: AsyncSession) -> schemas.TrainingJobOut:
+    from ..local_trainer import run_local_training
+
+    job = models.TrainingJob(
+        project_id=project_id,
+        runpod_job_id=None,
+        status="queued",
+        config_json=json.dumps(cfg.model_dump()),
+        log=(f"[{_now().isoformat()}] Local training queued.\n"
+             f"Samples: {sample_count} | Base model: {cfg.base_model}\n"
+             f"GGUF quantisation: {cfg.gguf_quantization}"
+             + (f" | Ollama name: {cfg.ollama_model_name}" if cfg.ollama_model_name else "") + "\n"),
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    # Launch training in a thread — returns immediately, thread updates DB directly.
+    asyncio.create_task(
+        asyncio.to_thread(run_local_training, job.id, jsonl_text, cfg.model_dump(), EXPORT_DIR)
+    )
+    return _job_out(job)
+
+
+async def _start_runpod(project_id: str, cfg: schemas.TrainingConfig,
+                        jsonl_text: str, sample_count: int,
+                        db: AsyncSession) -> schemas.TrainingJobOut:
+    dataset_b64 = base64.b64encode(jsonl_text.encode()).decode()
     payload = {
         "dataset_b64": dataset_b64,
-        "dataset_format": cfg.dataset_format,
+        "config": cfg.model_dump(),
         "sample_count": sample_count,
-        "training_config": {
-            "base_model": cfg.base_model,
-            "lora_r": cfg.lora_r,
-            "lora_alpha": cfg.lora_alpha,
-            "lora_dropout": cfg.lora_dropout,
-            "num_epochs": cfg.num_epochs,
-            "batch_size": cfg.batch_size,
-            "learning_rate": cfg.learning_rate,
-            "max_seq_length": cfg.max_seq_length,
-            "use_4bit": cfg.use_4bit,
-        },
     }
-
     try:
         result = await submit_job(payload)
     except ValueError as exc:
@@ -150,8 +167,8 @@ async def start_training(project_id: str, cfg: schemas.TrainingConfig,
         runpod_job_id=runpod_job_id,
         status="queued",
         config_json=json.dumps(cfg.model_dump()),
-        log=f"[{_now().isoformat()}] Job submitted to RunPod. job_id={runpod_job_id}\n"
-            f"Samples: {sample_count} | Base model: {cfg.base_model}\n",
+        log=(f"[{_now().isoformat()}] Job submitted to RunPod. job_id={runpod_job_id}\n"
+             f"Samples: {sample_count} | Base model: {cfg.base_model}\n"),
     )
     db.add(job)
     await db.commit()
@@ -165,12 +182,11 @@ async def get_job(project_id: str, job_id: str, db: AsyncSession = Depends(get_s
     if not job or job.project_id != project_id:
         raise HTTPException(404, "Training job not found")
 
-    # Sync status from RunPod if job is still active.
+    # Only poll RunPod for RunPod jobs that are still active.
     if job.runpod_job_id and job.status in ("queued", "running", "IN_QUEUE", "IN_PROGRESS"):
         try:
             rp = await job_status(job.runpod_job_id)
-            rp_status = (rp.get("status") or "").upper()
-            _sync_runpod_status(job, rp_status, rp)
+            _sync_runpod_status(job, (rp.get("status") or "").upper(), rp)
             await db.commit()
             await db.refresh(job)
         except Exception as exc:  # noqa: BLE001
@@ -182,12 +198,9 @@ async def get_job(project_id: str, job_id: str, db: AsyncSession = Depends(get_s
 
 def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> None:
     status_map = {
-        "IN_QUEUE": "queued",
-        "IN_PROGRESS": "running",
-        "COMPLETED": "completed",
-        "FAILED": "failed",
-        "CANCELLED": "cancelled",
-        "TIMED_OUT": "failed",
+        "IN_QUEUE": "queued", "IN_PROGRESS": "running",
+        "COMPLETED": "completed", "FAILED": "failed",
+        "CANCELLED": "cancelled", "TIMED_OUT": "failed",
     }
     new_status = status_map.get(rp_status, job.status)
     if new_status != job.status:
@@ -199,13 +212,12 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> No
         if output.get("log"):
             job.log += f"\n{output['log']}"
         if new_status == "completed" and output.get("model_files"):
-            # Worker returns adapter files as base64 blobs — save to disk.
             out_dir = Path(EXPORT_DIR) / "models" / job.id
             out_dir.mkdir(parents=True, exist_ok=True)
             for fname, b64_content in output["model_files"].items():
                 (out_dir / fname).write_bytes(base64.b64decode(b64_content))
             job.model_path = str(out_dir)
-            job.log += f"\n[{_now().isoformat()}] Model saved to {out_dir}"
+            job.log += f"\n[{_now().isoformat()}] Adapter saved to {out_dir}"
 
     if new_status in ("completed", "failed", "cancelled") and not job.finished_at:
         job.finished_at = _now()
@@ -216,14 +228,22 @@ async def cancel_training(project_id: str, job_id: str, db: AsyncSession = Depen
     job = await db.get(models.TrainingJob, job_id)
     if not job or job.project_id != project_id:
         raise HTTPException(404, "Training job not found")
-    if job.runpod_job_id:
+
+    cfg = load_json(job.config_json, {})
+    if cfg.get("provider") == "local" or not job.runpod_job_id:
+        from ..local_trainer import request_cancel
+        request_cancel(job.id)
+        # Status will be updated by the thread; mark as cancelling now for the UI.
+        job.log += f"\n[{_now().isoformat()}] Cancel signal sent — waiting for training step to complete."
+    else:
         try:
             await cancel_job(job.runpod_job_id)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(502, f"RunPod cancel error: {exc}")
-    job.status = "cancelled"
-    job.finished_at = _now()
-    job.log += f"\n[{_now().isoformat()}] Cancelled by user."
+        job.status = "cancelled"
+        job.finished_at = _now()
+        job.log += f"\n[{_now().isoformat()}] Cancelled by user."
+
     await db.commit()
     return {"ok": True}
 
@@ -236,12 +256,7 @@ async def download_model(project_id: str, job_id: str, db: AsyncSession = Depend
     if not job.model_path or not Path(job.model_path).exists():
         raise HTTPException(404, "Model files not available yet.")
 
-    # Zip the adapter directory for download.
     import shutil, tempfile
     tmp = tempfile.mktemp(suffix=".zip")
     shutil.make_archive(tmp.removesuffix(".zip"), "zip", job.model_path)
-    return FileResponse(
-        tmp,
-        filename=f"adapter_{job_id[:8]}.zip",
-        media_type="application/zip",
-    )
+    return FileResponse(tmp, filename=f"adapter_{job_id[:8]}.zip", media_type="application/zip")

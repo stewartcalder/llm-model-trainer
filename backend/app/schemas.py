@@ -146,9 +146,10 @@ class LLMStatusOut(BaseModel):
     detail: str = ""
 
 
-# ---- Training (RunPod) ----
+# ---- Training ----
 class TrainingConfig(BaseModel):
-    base_model: str = "meta-llama/Llama-3.2-1B"
+    provider: str = "local"                      # "local" | "runpod"
+    base_model: str = "unsloth/Llama-3.2-1B-Instruct"
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -157,8 +158,18 @@ class TrainingConfig(BaseModel):
     learning_rate: float = 2e-4
     max_seq_length: int = 2048
     use_4bit: bool = True
-    dataset_format: str = "alpaca"  # alpaca | sharegpt | openai
+    dataset_format: str = "alpaca"               # alpaca | sharegpt | openai
     include_statuses: list[str] = ["approved"]
+    # Local-only fields
+    gguf_quantization: str = "q4_k_m"           # q4_k_m | q5_k_m | q8_0 | f16
+    ollama_model_name: str = ""                  # name to register in local Ollama
+
+
+class LocalStatusOut(BaseModel):
+    available: bool
+    version: str | None = None
+    gpu: bool = False
+    detail: str = ""
 
 
 class TrainingJobOut(BaseModel):

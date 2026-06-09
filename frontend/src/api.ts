@@ -1,5 +1,5 @@
 import type {
-  Chunk, DryRun, ExportResult, LLMStatus, Meta, PipelineConfig, Project, Run,
+  Chunk, DryRun, ExportResult, LocalStatus, LLMStatus, Meta, PipelineConfig, Project, Run,
   RunPodStatus, Sample, Source, Stats, TrainingConfig, TrainingJob,
 } from "./types";
 
@@ -96,7 +96,8 @@ export const api = {
   // LLM status
   llmStatus: (pid: string) => req<LLMStatus>(`/llm-status?project_id=${pid}`),
 
-  // Training (RunPod)
+  // Training
+  localStatus: (pid: string) => req<LocalStatus>(`/projects/${pid}/training/local-status`),
   runpodStatus: (pid: string) => req<RunPodStatus>(`/projects/${pid}/training/runpod-status`),
   gpuTypes: (pid: string) => req<{ gpu_types: Record<string, unknown>[] }>(`/projects/${pid}/training/gpu-types`),
   listTrainingJobs: (pid: string) => req<TrainingJob[]>(`/projects/${pid}/training/jobs`),

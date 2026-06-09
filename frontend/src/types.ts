@@ -120,6 +120,7 @@ export interface LLMStatus {
 }
 
 export interface TrainingConfig {
+  provider: "local" | "runpod";
   base_model: string;
   lora_r: number;
   lora_alpha: number;
@@ -131,6 +132,16 @@ export interface TrainingConfig {
   use_4bit: boolean;
   dataset_format: string;
   include_statuses: string[];
+  // Local-only
+  gguf_quantization: string;
+  ollama_model_name: string;
+}
+
+export interface LocalStatus {
+  available: boolean;
+  version: string | null;
+  gpu: boolean;
+  detail: string;
 }
 
 export interface TrainingJob {
