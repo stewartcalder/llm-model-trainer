@@ -137,6 +137,14 @@ export interface TrainingConfig {
   ollama_model_name: string;
 }
 
+export interface OllamaModelInfo {
+  ollama_name: string;
+  hf_model: string | null;
+  cached: boolean;
+  size_gb: number;
+  mapped: boolean;
+}
+
 export interface LocalStatus {
   available: boolean;
   version: string | null;

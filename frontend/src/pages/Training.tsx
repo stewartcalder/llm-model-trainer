@@ -1,20 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { LocalStatus, Project, RunPodStatus, Stats, TrainingConfig, TrainingJob } from "../types";
+import type { LocalStatus, OllamaModelInfo, Project, RunPodStatus, Stats, TrainingConfig, TrainingJob } from "../types";
 import { Badge, useToast } from "../ui";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
-const UNSLOTH_MODELS = [
-  { id: "unsloth/Llama-3.2-1B-Instruct",   label: "Llama 3.2 1B — fastest, minimal VRAM" },
-  { id: "unsloth/Llama-3.2-3B-Instruct",   label: "Llama 3.2 3B" },
-  { id: "unsloth/Llama-3.1-8B-Instruct",   label: "Llama 3.1 8B — popular balance" },
-  { id: "unsloth/Phi-3.5-mini-instruct",   label: "Phi-3.5 mini 3.8B — Microsoft" },
-  { id: "unsloth/Qwen2.5-7B-Instruct",     label: "Qwen 2.5 7B — multilingual" },
-  { id: "unsloth/mistral-7b-instruct-v0.3",label: "Mistral 7B" },
-  { id: "unsloth/gemma-2-9b-it",           label: "Gemma 2 9B — Google" },
-  { id: "__custom__",                       label: "Custom HuggingFace model ID…" },
-];
 
 const GGUF_QUANTS = [
   { id: "q4_k_m", label: "Q4_K_M — recommended (~4 GB)" },
@@ -135,6 +124,7 @@ export default function Training({ project, stats }: { project: Project; stats: 
   const [customModel, setCustomModel] = useState("");
   const [localStatus, setLocalStatus] = useState<LocalStatus | null>(null);
   const [rpStatus, setRpStatus] = useState<RunPodStatus | null>(null);
+  const [ollamaModels, setOllamaModels] = useState<OllamaModelInfo[]>([]);
   const [jobs, setJobs] = useState<TrainingJob[]>([]);
   const [activeJob, setActiveJob] = useState<TrainingJob | null>(null);
   const [starting, setStarting] = useState(false);
@@ -142,10 +132,7 @@ export default function Training({ project, stats }: { project: Project; stats: 
   const toast = useToast();
 
   const provider = cfg.provider;
-
-  // Derive the actual base_model for the config.
-  const selectedPreset = UNSLOTH_MODELS.find(m => m.id === cfg.base_model) ?? { id: "__custom__", label: "" };
-  const isCustom = selectedPreset.id === "__custom__" || !UNSLOTH_MODELS.slice(0, -1).find(m => m.id === cfg.base_model);
+  const isCustom = !ollamaModels.some(m => m.hf_model === cfg.base_model);
 
   const loadLocal = useCallback(() =>
     api.localStatus(project.id).then(setLocalStatus).catch(() => {}), [project.id]);
@@ -153,10 +140,13 @@ export default function Training({ project, stats }: { project: Project; stats: 
     api.runpodStatus(project.id).then(setRpStatus).catch(() => {}), [project.id]);
   const loadJobs = useCallback(() =>
     api.listTrainingJobs(project.id).then(j => { setJobs(j); return j; }), [project.id]);
+  const loadOllamaModels = useCallback(() =>
+    api.ollamaModels(project.id).then(r => setOllamaModels(r.models)).catch(() => {}), [project.id]);
 
   useEffect(() => {
     loadLocal();
     loadRunpod();
+    loadOllamaModels();
     loadJobs().then(j => { if (j.length) setActiveJob(j[0]); });
   }, [project.id]);
 
@@ -175,20 +165,12 @@ export default function Training({ project, stats }: { project: Project; stats: 
     return () => { if (pollRef.current) window.clearInterval(pollRef.current); };
   }, [activeJob?.id, activeJob?.status]);
 
-  const handlePresetChange = (presetId: string) => {
-    if (presetId === "__custom__") {
-      setCfg(c => ({ ...c, base_model: customModel || "" }));
-    } else {
-      setCfg(c => ({ ...c, base_model: presetId }));
-    }
-  };
-
   const handleProviderSwitch = (p: "local" | "runpod") => {
     setCfg(c => ({
       ...c,
       provider: p,
       base_model: p === "local"
-        ? "unsloth/Llama-3.2-1B-Instruct"
+        ? (ollamaModels.find(m => m.mapped)?.hf_model ?? "unsloth/Llama-3.2-1B-Instruct")
         : "meta-llama/Llama-3.2-1B",
     }));
   };
@@ -261,28 +243,69 @@ export default function Training({ project, stats }: { project: Project; stats: 
           <Section title="Base model">
             {provider === "local" ? (
               <>
-                <label className="field">
-                  <span>Model preset</span>
-                  <select
-                    value={isCustom ? "__custom__" : cfg.base_model}
-                    onChange={e => handlePresetChange(e.target.value)}
-                  >
-                    {UNSLOTH_MODELS.map(m => (
-                      <option key={m.id} value={m.id}>{m.label}</option>
-                    ))}
-                  </select>
-                </label>
-                {isCustom && (
-                  <label className="field">
-                    <span>HuggingFace model ID</span>
-                    <input type="text" value={customModel}
-                      onChange={e => { setCustomModel(e.target.value); setCfg(c => ({ ...c, base_model: e.target.value })); }}
-                      placeholder="username/model-name" />
-                  </label>
+                {ollamaModels.length > 0 && (
+                  <>
+                    <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
+                      Your Ollama models — click one to select it for training.
+                      Ollama's GGUF files can't be used directly; the full-precision weights
+                      are fetched from HuggingFace (once, then cached locally).
+                    </div>
+                    <table style={{ marginBottom: 14 }}>
+                      <thead>
+                        <tr>
+                          <th>Ollama model</th>
+                          <th>Size</th>
+                          <th>HuggingFace equivalent</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ollamaModels.map(m => {
+                          const selected = cfg.base_model === m.hf_model;
+                          return (
+                            <tr
+                              key={m.ollama_name}
+                              onClick={() => m.mapped && setCfg(c => ({ ...c, base_model: m.hf_model! }))}
+                              style={{ cursor: m.mapped ? "pointer" : "default",
+                                       opacity: m.mapped ? 1 : 0.45,
+                                       background: selected ? "var(--accent-dim)" : undefined }}
+                            >
+                              <td className="mono" style={{ fontSize: 12 }}>{m.ollama_name}</td>
+                              <td className="muted" style={{ fontSize: 11 }}>{m.size_gb} GB</td>
+                              <td className="mono" style={{ fontSize: 11 }}>
+                                {m.hf_model ?? <span className="muted">no mapping</span>}
+                              </td>
+                              <td>
+                                {m.cached && <span className="badge green" style={{ fontSize: 10 }}>cached</span>}
+                                {selected && <span className="badge blue" style={{ fontSize: 10 }}>selected</span>}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </>
                 )}
-                <div className="muted" style={{ fontSize: 11 }}>
-                  Models are downloaded from HuggingFace on first use. Ensure you have accepted any licence agreements.
-                </div>
+                <label className="field">
+                  <span>{ollamaModels.length > 0 ? "Or enter a custom HuggingFace model ID" : "HuggingFace model ID"}</span>
+                  <input type="text"
+                    value={isCustom ? customModel : cfg.base_model}
+                    onChange={e => {
+                      setCustomModel(e.target.value);
+                      setCfg(c => ({ ...c, base_model: e.target.value }));
+                    }}
+                    placeholder="unsloth/Llama-3.2-1B-Instruct"
+                    onFocus={() => { if (!isCustom) { setCustomModel(""); setCfg(c => ({ ...c, base_model: "" })); }}}
+                  />
+                </label>
+                {cfg.base_model && !isCustom && (
+                  <div className="muted" style={{ fontSize: 11 }}>
+                    Selected: <code>{cfg.base_model}</code>
+                    {ollamaModels.find(m => m.hf_model === cfg.base_model)?.cached
+                      ? " — already in HuggingFace cache, no download needed."
+                      : " — will be downloaded from HuggingFace on first use."}
+                  </div>
+                )}
               </>
             ) : (
               <label className="field">

@@ -1,6 +1,6 @@
 import type {
-  Chunk, DryRun, ExportResult, LocalStatus, LLMStatus, Meta, PipelineConfig, Project, Run,
-  RunPodStatus, Sample, Source, Stats, TrainingConfig, TrainingJob,
+  Chunk, DryRun, ExportResult, LocalStatus, LLMStatus, Meta, OllamaModelInfo,
+  PipelineConfig, Project, Run, RunPodStatus, Sample, Source, Stats, TrainingConfig, TrainingJob,
 } from "./types";
 
 const BASE = "/api";
@@ -98,6 +98,7 @@ export const api = {
 
   // Training
   localStatus: (pid: string) => req<LocalStatus>(`/projects/${pid}/training/local-status`),
+  ollamaModels: (pid: string) => req<{ models: OllamaModelInfo[]; error: string | null }>(`/projects/${pid}/training/ollama-models`),
   runpodStatus: (pid: string) => req<RunPodStatus>(`/projects/${pid}/training/runpod-status`),
   gpuTypes: (pid: string) => req<{ gpu_types: Record<string, unknown>[] }>(`/projects/${pid}/training/gpu-types`),
   listTrainingJobs: (pid: string) => req<TrainingJob[]>(`/projects/${pid}/training/jobs`),

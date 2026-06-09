@@ -63,12 +63,108 @@ async def _build_dataset(project_id: str, db: AsyncSession,
     return "\n".join(lines) + "\n", len(samples)
 
 
+# ── Ollama model → HuggingFace mapping ──────────────────────────────────────
+
+# Maps the Ollama model tag (lowercased, :latest stripped) to the best
+# Unsloth-optimised HuggingFace equivalent for fine-tuning.
+_OLLAMA_HF_MAP: dict[str, str] = {
+    # Llama
+    "llama3.2:1b":         "unsloth/Llama-3.2-1B-Instruct",
+    "llama3.2:3b":         "unsloth/Llama-3.2-3B-Instruct",
+    "llama3.1:8b":         "unsloth/Llama-3.1-8B-Instruct",
+    "llama3.1:70b":        "unsloth/Llama-3.1-70B-Instruct",
+    "llama3:8b":           "unsloth/llama-3-8b-Instruct",
+    # Mistral / Mixtral
+    "mistral:7b":          "unsloth/mistral-7b-instruct-v0.3",
+    "mistral":             "unsloth/mistral-7b-instruct-v0.3",
+    "mixtral:8x7b":        "unsloth/Mixtral-8x7B-Instruct-v0.1",
+    # Phi
+    "phi3:mini":           "unsloth/Phi-3-mini-4k-instruct",
+    "phi3.5:mini":         "unsloth/Phi-3.5-mini-instruct",
+    "phi4:14b":            "unsloth/phi-4",
+    "phi4":                "unsloth/phi-4",
+    # Qwen 2.5
+    "qwen2.5:0.5b":        "unsloth/Qwen2.5-0.5B-Instruct",
+    "qwen2.5:1.5b":        "unsloth/Qwen2.5-1.5B-Instruct",
+    "qwen2.5:3b":          "unsloth/Qwen2.5-3B-Instruct",
+    "qwen2.5:7b":          "unsloth/Qwen2.5-7B-Instruct",
+    "qwen2.5:14b":         "unsloth/Qwen2.5-14B-Instruct",
+    "qwen2.5:32b":         "unsloth/Qwen2.5-32B-Instruct",
+    "qwen2.5:72b":         "unsloth/Qwen2.5-72B-Instruct",
+    # Qwen 3
+    "qwen3:1.7b":          "unsloth/Qwen3-1.7B",
+    "qwen3:4b":            "unsloth/Qwen3-4B",
+    "qwen3:8b":            "unsloth/Qwen3-8B",
+    "qwen3:14b":           "unsloth/Qwen3-14B",
+    "qwen3:32b":           "unsloth/Qwen3-32B",
+    # Gemma 2
+    "gemma2:2b":           "unsloth/gemma-2-2b-it",
+    "gemma2:9b":           "unsloth/gemma-2-9b-it",
+    "gemma2:27b":          "unsloth/gemma-2-27b-it",
+    # Gemma 3
+    "gemma3:1b":           "unsloth/gemma-3-1b-it",
+    "gemma3:4b":           "unsloth/gemma-3-4b-it",
+    "gemma3:12b":          "unsloth/gemma-3-12b-it",
+    "gemma3:27b":          "unsloth/gemma-3-27b-it",
+    # DeepSeek
+    "deepseek-r1:7b":      "unsloth/DeepSeek-R1-Distill-Qwen-7B",
+    "deepseek-r1:14b":     "unsloth/DeepSeek-R1-Distill-Qwen-14B",
+    "deepseek-r1:32b":     "unsloth/DeepSeek-R1-Distill-Qwen-32B",
+}
+
+
+def _ollama_to_hf(name: str) -> str | None:
+    key = name.lower().removesuffix(":latest")
+    return _OLLAMA_HF_MAP.get(key)
+
+
+def _hf_cached(hf_model_id: str) -> bool:
+    """Return True if the HuggingFace model weights are in the local cache."""
+    cache_root = Path(os.environ.get("HF_HOME",
+                      Path.home() / ".cache" / "huggingface")) / "hub"
+    model_dir = cache_root / f"models--{hf_model_id.replace('/', '--')}"
+    try:
+        return model_dir.exists() and any(model_dir.iterdir())
+    except OSError:
+        return False
+
+
 # ── Local (Unsloth) status ───────────────────────────────────────────────────
 
 @router.get("/local-status", response_model=schemas.LocalStatusOut)
 async def local_status(project_id: str):
     from ..local_trainer import check_unsloth
     return schemas.LocalStatusOut(**check_unsloth())
+
+
+@router.get("/ollama-models")
+async def ollama_models(project_id: str):
+    """List installed Ollama models with their HuggingFace training equivalents."""
+    import httpx
+    base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{base_url}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        return {"models": [], "error": str(exc)}
+
+    out = []
+    for m in data.get("models", []):
+        name: str = m.get("name", "")
+        hf_id = _ollama_to_hf(name)
+        out.append({
+            "ollama_name": name,
+            "hf_model": hf_id,
+            "cached": _hf_cached(hf_id) if hf_id else False,
+            "size_gb": round(m.get("size", 0) / 1e9, 1),
+            "mapped": hf_id is not None,
+        })
+
+    # Sort: mapped first, then by size
+    out.sort(key=lambda x: (not x["mapped"], x["size_gb"]))
+    return {"models": out, "error": None}
 
 
 # ── RunPod connectivity ──────────────────────────────────────────────────────
