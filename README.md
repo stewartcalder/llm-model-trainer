@@ -1,14 +1,10 @@
 # LoRA / QLoRA Training Data Builder
 
 A single-user web app that turns curated source material (PDFs, web pages) into a
-well-formed instruction-tuning dataset, ready to load into a LoRA / QLoRA pipeline.
+well-formed instruction-tuning dataset, then fine-tunes a LoRA adapter and pushes
+the result directly to a local Ollama model server.
 
-> **You curate. The app transforms.** Add sources → configure → run → review → export.
-
-This is the **Phase 1 MVP** from [the spec](app-documentation/lora-training-data-builder-spec.md):
-PDF + URL sources, sentence-window chunking, Q&A + Instruction sample types,
-Anthropic / Ollama providers (plus an offline **mock** provider), Alpaca JSONL
-export, SQLite storage.
+> **You curate. The app transforms and trains.** Add sources → configure → run → review → export → fine-tune → use.
 
 ---
 
@@ -35,65 +31,109 @@ latter). API calls are proxied to the backend.
 
 ---
 
-## How it works
+## Full workflow
 
 ```
-Add Sources ──▶ Configure ──▶ Run ──▶ Review ──▶ Export
-  PDF / URL     chunking,     ingest    approve /   Alpaca /
-                sample types, chunk     reject /    ShareGPT /
-                LLM, budget   generate  edit        OpenAI JSONL
+Add Sources ──▶ Configure ──▶ Run ──▶ Review ──▶ Export   ──▶ Fine-Tune ──▶ Ollama
+  PDF / URL     chunking,     ingest    approve /   JSONL /     Local GPU     ollama run
+                sample types, chunk     reject /    RunPod      or RunPod     <your-model>
+                LLM, budget   generate  edit        download    cloud GPU
                               validate
 ```
 
-1. **Sources** — drop PDFs or paste URLs. Text is extracted with `pypdf` /
-   `trafilatura`. Duplicate files are skipped (content-hash dedup).
-2. **Pipeline** — sentence-window chunking (configurable window/overlap), pick
-   sample types, choose an LLM provider/model, set concurrency and a USD budget.
-3. **Run** — a dry-run estimate first, then a background pipeline with a live
-   progress bar, log stream, sample preview, running cost ticker, and cancel.
-   For each chunk × sample type the app makes a **generation** call and an
-   optional **critic** call; clean samples auto-approve, flagged ones wait for review.
-4. **Review** — filter/search the samples table, inline-edit any field, approve /
-   reject per-row or in bulk. Quality scores below 3 are flagged.
-5. **Export** — Alpaca / ShareGPT / OpenAI JSONL with a stratified train/val split
-   and a reproducibility manifest (config snapshot + counts).
+1. **Sources** — drop PDFs or paste URLs. Text is extracted with `pypdf` / `trafilatura`. Duplicate files are skipped (content-hash dedup).
+2. **Configure** — sentence-window chunking (configurable window/overlap), pick sample types (Q&A / Instruction), choose an LLM provider/model, set concurrency and a USD budget cap.
+3. **Run** — dry-run estimate first, then a background pipeline with a live progress bar, log stream, sample preview, running cost ticker, and cancel button. Each chunk × sample type makes a **generation** call and an optional **critic** call; clean samples auto-approve, flagged ones wait for review.
+4. **Review** — filter/search the samples table, inline-edit any field, approve / reject per-row or in bulk.
+5. **Export** — Alpaca / ShareGPT / OpenAI JSONL with a stratified train/val split and a reproducibility manifest.
+6. **Fine-Tune** — train a LoRA adapter directly from the app:
+   - **Local (Unsloth)** — runs on your GPU using Unsloth + TRL. Exports a GGUF and registers it in your local Ollama server automatically.
+   - **RunPod (Cloud)** — submits the dataset to a RunPod serverless endpoint for training on cloud GPUs; returns the adapter files for download.
 
 ---
 
-## LLM providers
+## LLM providers (data generation)
 
 | Provider | Notes |
 |---|---|
 | `mock` | Deterministic, offline, no key. Default — use it to try the whole flow. |
-| `anthropic` | Set the API key in Pipeline settings or the `ANTHROPIC_API_KEY` env var. |
-| `ollama` | Any local OpenAI-compatible endpoint; set the base URL (default `http://localhost:11434/v1`). |
+| `anthropic` | Set `ANTHROPIC_API_KEY` in `backend/.env` or in Pipeline settings. |
+| `ollama` | Any local OpenAI-compatible endpoint; default `http://localhost:11434/v1`. |
+
+---
+
+## Training providers
+
+| Provider | Requirements | Output |
+|---|---|---|
+| **Local (Unsloth)** | NVIDIA GPU, `python3.12-dev`, `cmake`, Unsloth/torch installed (see CLAUDE.md) | GGUF quantised adapter merged with base model, registered in Ollama |
+| **RunPod (Cloud)** | `RUNPOD_API_KEY` + `RUNPOD_ENDPOINT_ID` in `.env`, Docker image deployed | Adapter zip download. **Note: training data is sent to RunPod — don't use for proprietary data.** |
+
+### Base model selection
+
+The Training tab reads your local Ollama model list and maps each installed model to
+its HuggingFace fine-tuning equivalent (e.g. `qwen3:14b` → `unsloth/Qwen3-14B`).
+A **cached** badge appears when the HF weights are already in `~/.cache/huggingface/hub/`.
+
+On first GGUF export, llama.cpp is cloned and built automatically (~10 min, one-time only).
+Subsequent exports reuse the cached build.
+
+---
+
+## Environment setup
+
+Create `backend/.env`:
+
+```
+DATABASE_URL=postgresql+asyncpg://user:pass@127.0.0.1:5433/lora_builder
+ANTHROPIC_API_KEY=
+OPENAI_API_KEY=
+RUNPOD_API_KEY=
+RUNPOD_ENDPOINT_ID=
+```
+
+Leave optional keys blank (not quoted empty strings).
 
 ---
 
 ## Project layout
 
 ```
-backend/                 FastAPI + SQLAlchemy (async) + the pipeline
+backend/                 FastAPI + SQLAlchemy (async, PostgreSQL)
   app/
     main.py              app entry; serves API and the built SPA
-    models.py            ORM: projects, sources, chunks, samples, runs
+    models.py            ORM: projects, sources, chunks, samples, runs, training_jobs
+    pipeline.py          ingest → chunk → generate → validate (async, bounded concurrency)
+    local_trainer.py     Unsloth training thread + llama.cpp GGUF export
+    runpod_client.py     RunPod serverless REST + GraphQL client
+    routers/training.py  Training endpoints; Ollama→HF model map; local + RunPod dispatch
     ingest.py            PDF / URL extraction
     chunking.py          sentence-window chunking (tiktoken)
     llm.py               provider abstraction (mock / anthropic / ollama)
-    pipeline.py          ingest → chunk → generate → validate (async, bounded concurrency)
     export.py            Alpaca / ShareGPT / OpenAI JSONL writers
-    prompts.py           generation + critic templates
+    prompts.py           generation + critic prompt templates
     routers/             projects, sources, samples, runs, exports
-frontend/                React + TypeScript + Vite SPA
-  src/pages/             Dashboard, Sources, Configure, RunMonitor, Review, ExportPanel
-data/                    SQLite DB, uploaded sources, exports (git-ignored)
+frontend/                React + TypeScript + Vite SPA (no UI library)
+  src/pages/             Dashboard, Sources, Configure, RunMonitor, Review, ExportPanel, Training
+data/                    PostgreSQL-backed; uploads and exports on filesystem (git-ignored)
+runpod_worker/           Docker-based RunPod serverless handler
+app-documentation/       Product spec
 ```
-
-All data stays local under `data/` unless you explicitly export.
 
 ---
 
-## Not yet (Phase 2)
+## What's implemented
 
-Image sources, semantic / multi-turn chat samples, HF Hub push, Parquet,
-OCR for scanned PDFs, multi-project management, Tauri packaging. See the spec.
+| Phase | Feature | Status |
+|---|---|---|
+| 1 | PDF + URL ingestion, sentence-window chunking | ✅ |
+| 1 | Q&A + Instruction sample generation with critic | ✅ |
+| 1 | Anthropic / Ollama / mock providers | ✅ |
+| 1 | Alpaca / ShareGPT / OpenAI JSONL export | ✅ |
+| 1 | Multi-project management | ✅ |
+| 2 | PostgreSQL storage (upgraded from SQLite) | ✅ |
+| 3 | Local LoRA training via Unsloth | ✅ |
+| 3 | GGUF export + Ollama model registration | ✅ |
+| 3 | RunPod serverless cloud training | ✅ |
+| 3 | Ollama-installed model picker for base model selection | ✅ |
+| — | Image sources, semantic chunking, HF Hub push, Parquet | ❌ Not yet |

@@ -106,6 +106,12 @@ _OLLAMA_HF_MAP: dict[str, str] = {
     "gemma3:4b":           "unsloth/gemma-3-4b-it",
     "gemma3:12b":          "unsloth/gemma-3-12b-it",
     "gemma3:27b":          "unsloth/gemma-3-27b-it",
+    # Qwen 2.5 Coder
+    "qwen2.5-coder:1.5b":  "unsloth/Qwen2.5-Coder-1.5B-Instruct",
+    "qwen2.5-coder:7b":    "unsloth/Qwen2.5-Coder-7B-Instruct",
+    "qwen2.5-coder:14b":   "unsloth/Qwen2.5-Coder-14B-Instruct",
+    "qwen2.5-coder:14b-instruct": "unsloth/Qwen2.5-Coder-14B-Instruct",
+    "qwen2.5-coder:32b":   "unsloth/Qwen2.5-Coder-32B-Instruct",
     # DeepSeek
     "deepseek-r1:7b":      "unsloth/DeepSeek-R1-Distill-Qwen-7B",
     "deepseek-r1:14b":     "unsloth/DeepSeek-R1-Distill-Qwen-14B",
@@ -114,8 +120,20 @@ _OLLAMA_HF_MAP: dict[str, str] = {
 
 
 def _ollama_to_hf(name: str) -> str | None:
+    import re
     key = name.lower().removesuffix(":latest")
-    return _OLLAMA_HF_MAP.get(key)
+    if key in _OLLAMA_HF_MAP:
+        return _OLLAMA_HF_MAP[key]
+    # For quantized variants (e.g. "deepseek-r1:32b-qwen-distill-q4_k_m"),
+    # try matching just the model-name:size prefix.
+    if ":" in key:
+        model_name, tag = key.split(":", 1)
+        m = re.match(r"(\d+(?:\.\d+)?[bm])", tag)
+        if m:
+            short_key = f"{model_name}:{m.group(1)}"
+            if short_key in _OLLAMA_HF_MAP:
+                return _OLLAMA_HF_MAP[short_key]
+    return None
 
 
 def _hf_cached(hf_model_id: str) -> bool:
@@ -141,12 +159,17 @@ async def local_status(project_id: str):
 async def ollama_models(project_id: str):
     """List installed Ollama models with their HuggingFace training equivalents."""
     import httpx
-    base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    # Ollama exports OLLAMA_HOST without a scheme (e.g. "0.0.0.0:11434")
-    if not base_url.startswith(("http://", "https://")):
-        base_url = f"http://{base_url}"
-    # Ollama binds to 0.0.0.0 for its own listening; clients connect via localhost
-    base_url = base_url.replace("0.0.0.0", "localhost")
+    from urllib.parse import urlparse
+    _host = os.environ.get("OLLAMA_HOST", "")
+    if not _host:
+        base_url = "http://localhost:11434"
+    else:
+        if not _host.startswith(("http://", "https://")):
+            _host = f"http://{_host}"
+        _parsed = urlparse(_host)
+        if not _parsed.port:
+            _host = f"{_parsed.scheme}://{_parsed.hostname}:11434"
+        base_url = _host.replace("0.0.0.0", "localhost").replace("[::]", "localhost")
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(f"{base_url}/api/tags")

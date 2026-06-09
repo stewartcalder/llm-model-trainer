@@ -39,6 +39,41 @@ def check_unsloth() -> dict:
         }
 
 
+# ── llama.cpp setup ──────────────────────────────────────────────────────────
+
+def _ensure_llama_cpp(log_fn) -> None:
+    """Ensure llama.cpp is built at ~/.unsloth/llama.cpp.
+
+    Unsloth calls ``input()`` to confirm a system-package install when running
+    outside Colab/Kaggle.  We patch ``builtins.input`` to auto-accept so the
+    build can proceed unattended.  cmake must already be installed on the host
+    (we install it as part of the server setup).
+    """
+    import builtins
+    from pathlib import Path as _Path
+
+    llama_dir = _Path.home() / ".unsloth" / "llama.cpp"
+    if llama_dir.exists():
+        return  # already installed
+
+    log_fn("llama.cpp not found — building it now (one-time setup, ~10 min)…")
+    log_fn("  cmake, git and gcc are required; cmake was installed as part of setup.")
+
+    _orig_input = builtins.input
+
+    def _auto_accept(prompt: str = "") -> str:
+        log_fn(f"  [auto-accept] {prompt}")
+        return ""  # same as pressing ENTER
+
+    builtins.input = _auto_accept
+    try:
+        from unsloth_zoo.llama_cpp import install_llama_cpp  # noqa: PLC0415
+        install_llama_cpp(print_output=False)
+        log_fn("llama.cpp built successfully.")
+    finally:
+        builtins.input = _orig_input
+
+
 # ── DB helpers (sync, psycopg2) ──────────────────────────────────────────────
 
 def _conn():
@@ -212,9 +247,24 @@ def run_local_training(job_id: str, dataset_jsonl: str, config: dict, export_dir
         gguf_dir = out_dir / "gguf"
         gguf_dir.mkdir(parents=True, exist_ok=True)
         log(f"Merging weights and exporting GGUF ({quant}) — this can take several minutes…")
+        _ensure_llama_cpp(log)
+        # Point HuggingFace at the GLOBAL cache so the fp16 base-model download
+        # (needed for GGUF conversion) is cached across training runs rather than
+        # being re-downloaded into each job's output directory.
+        import os as _os
+        _hf_home = str(Path.home() / ".cache" / "huggingface")
+        _os.environ["HF_HOME"] = _hf_home
+        _os.environ["HUGGINGFACE_HUB_CACHE"] = str(Path(_hf_home) / "hub")
+        log(f"HF cache → {_hf_home}")
         model.save_pretrained_gguf(str(gguf_dir), tokenizer, quantization_method=quant)
 
-        gguf_files = list(gguf_dir.glob("*.gguf"))
+        # Unsloth appends "_gguf" to the save directory; search there first,
+        # then fall back to a full recursive scan of the job output tree.
+        gguf_actual_dir = Path(str(gguf_dir) + "_gguf")
+        gguf_files = (list(gguf_actual_dir.glob("*.gguf"))
+                      if gguf_actual_dir.exists() else [])
+        if not gguf_files:
+            gguf_files = list(out_dir.rglob("*.gguf"))
         if not gguf_files:
             raise RuntimeError("GGUF export produced no .gguf file.")
         gguf_path = gguf_files[0]
@@ -224,8 +274,17 @@ def run_local_training(job_id: str, dataset_jsonl: str, config: dict, export_dir
         # Register with local Ollama if the user provided a name.
         ollama_name = (config.get("ollama_model_name") or "").strip()
         if ollama_name:
-            modelfile = gguf_dir / "Modelfile"
-            modelfile.write_text(f"FROM {gguf_path.absolute()}\n")
+            # Prefer Unsloth's generated Modelfile (has full chat template),
+            # but fix the FROM line to an absolute path so ollama create works
+            # from any working directory.
+            modelfile = gguf_path.parent / "Modelfile"
+            if modelfile.exists():
+                lines = modelfile.read_text().splitlines()
+                lines = [f"FROM {gguf_path.absolute()}" if l.startswith("FROM ") else l
+                         for l in lines]
+                modelfile.write_text("\n".join(lines) + "\n")
+            else:
+                modelfile.write_text(f"FROM {gguf_path.absolute()}\n")
             log(f"Running: ollama create {ollama_name}")
             proc = subprocess.run(
                 ["ollama", "create", ollama_name, "-f", str(modelfile)],

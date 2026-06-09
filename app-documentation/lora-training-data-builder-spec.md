@@ -1,7 +1,7 @@
 # LoRA/QLoRA Training Data Builder — Product Specification
 
-**Version:** 0.1  
-**Status:** Draft  
+**Version:** 0.3  
+**Status:** Phases 1–3 implemented  
 **Author:** Stewart Simpson  
 
 ---
@@ -158,6 +158,8 @@ Samples with `reject: true` or any dimension < 3 are flagged for human review ra
 | Ollama (local) | Any locally served model (qwen3, llama3, mistral, etc.) |
 | OpenAI-compatible | Any endpoint implementing `/v1/chat/completions` |
 
+> **Implemented:** mock, anthropic, ollama. OpenAI API is supported via the openai-compatible path.
+
 Provider, model, temperature, max_tokens, and API key are set in project settings. For image sources, the selected model must support vision.
 
 #### 5.3.4 Concurrency & Rate Limiting
@@ -239,27 +241,29 @@ Alternatively, ship as a pure Python CLI + web UI (FastAPI + React SPA served fr
 
 | Purpose | Library |
 |---|---|
-| PDF extraction | `pdfplumber`, `pypdf` |
-| OCR | `pytesseract` + Tesseract binary |
+| PDF extraction | `pypdf` |
 | Web fetch | `httpx`, `trafilatura` |
-| JS-rendered pages | `playwright` (optional) |
-| Chunking / tokenisation | `tiktoken`, `langchain_text_splitters` |
-| Embeddings (semantic chunk) | `sentence-transformers` |
+| Chunking / tokenisation | `tiktoken` |
 | LLM calls | `anthropic`, `openai` (both support Ollama-compatible endpoints) |
-| Database | `sqlalchemy` + `aiosqlite` |
-| Export | `datasets` (HF), `pyarrow` |
-| Task queue | `asyncio` with `anyio` semaphore for concurrency control |
+| Database | `sqlalchemy` + `asyncpg` (PostgreSQL) |
+| Local fine-tuning | `unsloth`, `trl`, `peft`, `bitsandbytes`, `torch` |
+| GGUF conversion | `llama.cpp` (built to `~/.unsloth/llama.cpp` on first use) |
+| Cloud training | RunPod serverless REST + GraphQL API |
+| Task queue | `asyncio` with semaphore for concurrency; `threading.Event` for training cancellation |
+| Sync DB writes from thread | `psycopg2-binary` |
 
-### 7.3 Data Model (SQLite)
+### 7.3 Data Model (PostgreSQL)
 
 ```sql
-projects        (id, name, created_at, config_json)
-sources         (id, project_id, type, path_or_url, title, status, metadata_json)
+projects        (id, name, description, created_at, config_json)
+sources         (id, project_id, type, path_or_url, title, status, hash, metadata_json)
 chunks          (id, source_id, text, token_count, page_or_section, char_start, char_end)
-samples         (id, chunk_id, type, instruction, input, output, 
+samples         (id, chunk_id, type, instruction, input, output,
                  quality_json, status, created_at, edited_at)
-runs            (id, project_id, config_snapshot_json, started_at, finished_at, 
-                 chunks_processed, samples_generated, tokens_used, cost_usd)
+runs            (id, project_id, config_snapshot_json, status, stage, started_at, finished_at,
+                 chunks_processed, chunks_total, samples_generated, tokens_used, cost_usd, log)
+training_jobs   (id, project_id, runpod_job_id, status, config_json, log,
+                 model_path, created_at, finished_at)
 ```
 
 ---
@@ -342,23 +346,32 @@ Projects persist their pipeline config as JSON alongside the SQLite DB:
 
 ---
 
-## 10. MVP Scope (Phase 1)
+## 10. Implementation Status
 
-Deliver a working end-to-end pipeline with:
+### Phase 1 — MVP ✅ Complete
 
-- PDF and URL source types (images in Phase 2)
-- Sentence-window chunking only
-- Q&A and Instruction sample types only
-- Anthropic and Ollama providers
-- Alpaca JSONL export
-- React web UI (no Tauri shell yet)
-- SQLite storage, single project at a time
+- PDF and URL source types
+- Sentence-window chunking
+- Q&A and Instruction sample types with critic
+- Anthropic, Ollama, and mock providers
+- Alpaca / ShareGPT / OpenAI JSONL export
+- React web UI
+- Multi-project management
 
-Estimated build: 3–5 days for a solo developer already familiar with the stack.
+### Phase 2 — Infrastructure ✅ Complete
 
----
+- Upgraded storage to PostgreSQL (asyncpg)
+- LLM provider status indicator in sidebar (live connectivity check)
 
-## 11. Phase 2 Extensions
+### Phase 3 — Local & Cloud Training ✅ Complete
+
+- **Local training (Unsloth)**: LoRA fine-tuning on local GPU, GGUF export, automatic Ollama model registration
+- **RunPod cloud training**: serverless endpoint integration with job polling and adapter download
+- **Ollama model picker**: maps installed Ollama models to HuggingFace training equivalents; shows HF cache status; handles quantised tag variants (e.g. `deepseek-r1:32b-qwen-distill-q4_K_M`)
+- **One-time llama.cpp build**: auto-detected and built unattended on first GGUF export
+- **Global HF cache**: fp16 base model download cached at `~/.cache/huggingface/hub/` across training runs
+
+### Remaining / Phase 4
 
 | Feature | Notes |
 |---|---|

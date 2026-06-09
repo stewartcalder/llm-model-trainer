@@ -2,6 +2,7 @@
 backend/.venv/
 __pycache__/
 *.pyc
+backend/unsloth_compiled_cache/
 
 # Node / frontend build
 frontend/node_modules/
