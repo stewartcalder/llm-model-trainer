@@ -28,8 +28,8 @@ DEFAULT_CONFIG: dict = {
     },
     "sample_types": ["qa", "instruction"],
     "llm": {
-        "provider": "mock",  # mock | anthropic | ollama
-        "model": "claude-haiku-4-5-20251001",
+        "provider": "ollama",  # mock | anthropic | ollama
+        "model": "qwen3:14b",
         "base_url": "http://localhost:11434/v1",  # used by ollama / openai-compatible
         "temperature": 0.7,
         "max_tokens": 1024,

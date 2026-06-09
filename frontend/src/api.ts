@@ -1,5 +1,6 @@
 import type {
-  Chunk, DryRun, ExportResult, Meta, PipelineConfig, Project, Run, Sample, Source, Stats,
+  Chunk, DryRun, ExportResult, LLMStatus, Meta, PipelineConfig, Project, Run,
+  RunPodStatus, Sample, Source, Stats, TrainingConfig, TrainingJob,
 } from "./types";
 
 const BASE = "/api";
@@ -91,4 +92,19 @@ export const api = {
     req<ExportResult>(`/projects/${pid}/export`, { method: "POST", body: JSON.stringify(body) }),
   downloadUrl: (pid: string, path: string) =>
     `${BASE}/projects/${pid}/export/download?path=${encodeURIComponent(path)}`,
+
+  // LLM status
+  llmStatus: (pid: string) => req<LLMStatus>(`/llm-status?project_id=${pid}`),
+
+  // Training (RunPod)
+  runpodStatus: (pid: string) => req<RunPodStatus>(`/projects/${pid}/training/runpod-status`),
+  gpuTypes: (pid: string) => req<{ gpu_types: Record<string, unknown>[] }>(`/projects/${pid}/training/gpu-types`),
+  listTrainingJobs: (pid: string) => req<TrainingJob[]>(`/projects/${pid}/training/jobs`),
+  getTrainingJob: (pid: string, jid: string) => req<TrainingJob>(`/projects/${pid}/training/jobs/${jid}`),
+  startTraining: (pid: string, cfg: TrainingConfig) =>
+    req<TrainingJob>(`/projects/${pid}/training/start`, { method: "POST", body: JSON.stringify(cfg) }),
+  cancelTraining: (pid: string, jid: string) =>
+    req<{ ok: boolean }>(`/projects/${pid}/training/jobs/${jid}/cancel`, { method: "POST" }),
+  downloadModelUrl: (pid: string, jid: string) =>
+    `${BASE}/projects/${pid}/training/jobs/${jid}/download`,
 };

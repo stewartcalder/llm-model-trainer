@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { Meta, Project, Stats } from "./types";
-import { ToastProvider } from "./ui";
+import { LLMStatusChip, ToastProvider, useLLMStatus } from "./ui";
 import ProjectsPage from "./pages/Projects";
 import Dashboard from "./pages/Dashboard";
 import Sources from "./pages/Sources";
@@ -9,8 +9,9 @@ import Configure from "./pages/Configure";
 import RunMonitor from "./pages/RunMonitor";
 import Review from "./pages/Review";
 import ExportPanel from "./pages/ExportPanel";
+import Training from "./pages/Training";
 
-type WorkspaceView = "dashboard" | "sources" | "configure" | "run" | "review" | "export";
+type WorkspaceView = "dashboard" | "sources" | "configure" | "run" | "review" | "export" | "training";
 
 const NAV: { id: WorkspaceView; label: string; icon: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "▦" },
@@ -19,6 +20,7 @@ const NAV: { id: WorkspaceView; label: string; icon: string }[] = [
   { id: "run", label: "Run", icon: "▶" },
   { id: "review", label: "Review", icon: "✓" },
   { id: "export", label: "Export", icon: "⤓" },
+  { id: "training", label: "Train (GPU)", icon: "⚡" },
 ];
 
 function Shell() {
@@ -28,6 +30,7 @@ function Shell() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [view, setView] = useState<WorkspaceView>("dashboard");
   const [loading, setLoading] = useState(true);
+  const llmStatus = useLLMStatus(activeProject?.id ?? null);
 
   const loadProjects = useCallback(async () => {
     const ps = await api.listProjects();
@@ -132,7 +135,10 @@ function Shell() {
         ))}
 
         <div className="spacer" />
-        <div className="muted" style={{ fontSize: 11, padding: "0 8px" }}>
+        <div style={{ padding: "0 4px", marginBottom: 8 }}>
+          <LLMStatusChip status={llmStatus} />
+        </div>
+        <div className="muted" style={{ fontSize: 11, padding: "0 8px", marginBottom: 4 }}>
           {stats ? `${stats.samples} samples · ${stats.approved_pct}% approved` : ""}
         </div>
       </nav>
@@ -163,6 +169,9 @@ function Shell() {
         )}
         {view === "export" && (
           <ExportPanel project={activeProject} meta={meta} stats={stats} />
+        )}
+        {view === "training" && (
+          <Training project={activeProject} stats={stats} />
         )}
       </main>
     </div>

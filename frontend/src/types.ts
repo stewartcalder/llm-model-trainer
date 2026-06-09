@@ -110,3 +110,43 @@ export interface Meta {
   providers: string[];
   export_formats: string[];
 }
+
+export interface LLMStatus {
+  ok: boolean;
+  provider: string;
+  model: string;
+  latency_ms: number;
+  detail: string;
+}
+
+export interface TrainingConfig {
+  base_model: string;
+  lora_r: number;
+  lora_alpha: number;
+  lora_dropout: number;
+  num_epochs: number;
+  batch_size: number;
+  learning_rate: number;
+  max_seq_length: number;
+  use_4bit: boolean;
+  dataset_format: string;
+  include_statuses: string[];
+}
+
+export interface TrainingJob {
+  id: string;
+  project_id: string;
+  runpod_job_id: string | null;
+  status: string;
+  config: Partial<TrainingConfig>;
+  log: string;
+  model_path: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
+
+export interface RunPodStatus {
+  configured: boolean;
+  endpoint_id: string;
+  health: Record<string, unknown>;
+}

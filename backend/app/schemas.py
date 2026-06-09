@@ -135,3 +135,45 @@ class ExportOut(BaseModel):
     manifest_file: str
     train_count: int
     val_count: int
+
+
+# ---- LLM status ----
+class LLMStatusOut(BaseModel):
+    ok: bool
+    provider: str
+    model: str
+    latency_ms: int
+    detail: str = ""
+
+
+# ---- Training (RunPod) ----
+class TrainingConfig(BaseModel):
+    base_model: str = "meta-llama/Llama-3.2-1B"
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    num_epochs: int = 3
+    batch_size: int = 4
+    learning_rate: float = 2e-4
+    max_seq_length: int = 2048
+    use_4bit: bool = True
+    dataset_format: str = "alpaca"  # alpaca | sharegpt | openai
+    include_statuses: list[str] = ["approved"]
+
+
+class TrainingJobOut(BaseModel):
+    id: str
+    project_id: str
+    runpod_job_id: str | None = None
+    status: str
+    config: dict[str, Any]
+    log: str
+    model_path: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+
+
+class RunPodStatusOut(BaseModel):
+    configured: bool
+    endpoint_id: str
+    health: dict[str, Any]

@@ -112,3 +112,22 @@ class Run(Base):
     log: Mapped[str] = mapped_column(Text, default="")
 
     project: Mapped[Project] = relationship(back_populates="runs")
+
+
+class TrainingJob(Base):
+    """A LoRA fine-tuning job dispatched to a RunPod serverless endpoint."""
+
+    __tablename__ = "training_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    runpod_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # queued | running | completed | failed | cancelled
+    status: Mapped[str] = mapped_column(String, default="queued")
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    log: Mapped[str] = mapped_column(Text, default="")
+    model_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[Project] = relationship()
