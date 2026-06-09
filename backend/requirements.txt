@@ -1,0 +1,23 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Database
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+
+# Validation
+pydantic==2.10.4
+
+# Source ingestion
+pypdf==5.1.0
+trafilatura==2.0.0
+httpx==0.28.1
+
+# Chunking / tokenisation
+tiktoken==0.8.0
+
+# LLM providers
+anthropic==0.42.0
+openai==1.59.6
