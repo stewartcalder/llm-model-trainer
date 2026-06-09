@@ -142,6 +142,11 @@ async def ollama_models(project_id: str):
     """List installed Ollama models with their HuggingFace training equivalents."""
     import httpx
     base_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    # Ollama exports OLLAMA_HOST without a scheme (e.g. "0.0.0.0:11434")
+    if not base_url.startswith(("http://", "https://")):
+        base_url = f"http://{base_url}"
+    # Ollama binds to 0.0.0.0 for its own listening; clients connect via localhost
+    base_url = base_url.replace("0.0.0.0", "localhost")
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             resp = await client.get(f"{base_url}/api/tags")
