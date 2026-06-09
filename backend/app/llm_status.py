@@ -73,7 +73,7 @@ async def _check_openai_compat(cfg: dict, model: str, t0: float) -> dict:
     import httpx
 
     base = (cfg.get("base_url") or "http://localhost:11434/v1").rstrip("/")
-    api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY", "ollama")
+    api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY") or "ollama"
     headers = {"Authorization": f"Bearer {api_key}"}
 
     async with httpx.AsyncClient(timeout=8.0) as client:
