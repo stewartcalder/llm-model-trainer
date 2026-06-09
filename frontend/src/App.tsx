@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import type { Meta, Project, Stats } from "./types";
 import { ToastProvider } from "./ui";
+import ProjectsPage from "./pages/Projects";
 import Dashboard from "./pages/Dashboard";
 import Sources from "./pages/Sources";
 import Configure from "./pages/Configure";
@@ -9,9 +10,9 @@ import RunMonitor from "./pages/RunMonitor";
 import Review from "./pages/Review";
 import ExportPanel from "./pages/ExportPanel";
 
-type View = "dashboard" | "sources" | "configure" | "run" | "review" | "export";
+type WorkspaceView = "dashboard" | "sources" | "configure" | "run" | "review" | "export";
 
-const NAV: { id: View; label: string; icon: string }[] = [
+const NAV: { id: WorkspaceView; label: string; icon: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "▦" },
   { id: "sources", label: "Sources", icon: "▤" },
   { id: "configure", label: "Pipeline", icon: "⚙" },
@@ -21,43 +22,99 @@ const NAV: { id: View; label: string; icon: string }[] = [
 ];
 
 function Shell() {
-  const [view, setView] = useState<View>("dashboard");
-  const [project, setProject] = useState<Project | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [view, setView] = useState<WorkspaceView>("dashboard");
+  const [loading, setLoading] = useState(true);
 
-  const loadProject = useCallback(async () => {
-    const projects = await api.listProjects();
-    setProject(projects[0]);
-    return projects[0];
+  const loadProjects = useCallback(async () => {
+    const ps = await api.listProjects();
+    setProjects(ps);
+    return ps;
   }, []);
 
   const refreshStats = useCallback(async (pid: string) => {
-    try {
-      setStats(await api.stats(pid));
-    } catch {
-      /* ignore */
-    }
+    try { setStats(await api.stats(pid)); } catch { /* ignore */ }
   }, []);
 
   useEffect(() => {
-    api.meta().then(setMeta);
-    loadProject().then((p) => p && refreshStats(p.id));
-  }, [loadProject, refreshStats]);
+    Promise.all([api.meta(), loadProjects()]).then(([m]) => {
+      setMeta(m);
+      setLoading(false);
+    });
+  }, [loadProjects]);
 
-  if (!project || !meta) {
-    return <div className="empty">Loading…</div>;
+  // Whenever the active project changes, reload its stats.
+  useEffect(() => {
+    if (activeProject) refreshStats(activeProject.id);
+  }, [activeProject, refreshStats]);
+
+  const selectProject = (p: Project) => {
+    setActiveProject(p);
+    setView("dashboard");
+    setStats(null);
+  };
+
+  const handleProjectsChanged = async () => {
+    const ps = await loadProjects();
+    // If the active project was deleted, go back to project list.
+    if (activeProject && !ps.find((p) => p.id === activeProject.id)) {
+      setActiveProject(null);
+    } else if (activeProject) {
+      const updated = ps.find((p) => p.id === activeProject.id);
+      if (updated) setActiveProject(updated);
+    }
+  };
+
+  const onChanged = useCallback(() => {
+    if (activeProject) refreshStats(activeProject.id);
+  }, [activeProject, refreshStats]);
+
+  if (loading || !meta) {
+    return <div className="empty" style={{ marginTop: 80 }}>Loading…</div>;
   }
 
-  const onChanged = () => refreshStats(project.id);
+  // ── Project picker ──────────────────────────────────────────────────────
+  if (!activeProject) {
+    return (
+      <div className="app" style={{ display: "block" }}>
+        <div style={{ borderBottom: "1px solid var(--border)", padding: "14px 36px", display: "flex", alignItems: "center", gap: 14, background: "var(--panel)" }}>
+          <span style={{ fontWeight: 700, fontSize: 16 }}>LoRA Data Builder</span>
+        </div>
+        <div className="main" style={{ maxWidth: 900 }}>
+          <ProjectsPage
+            projects={projects}
+            onSelect={selectProject}
+            onChanged={handleProjectsChanged}
+          />
+        </div>
+      </div>
+    );
+  }
 
+  // ── Per-project workspace ────────────────────────────────────────────────
   return (
     <div className="app">
       <nav className="sidebar">
-        <div className="brand">
-          LoRA Data Builder
-          <small>{project.name}</small>
+        {/* Project header + switch button */}
+        <div style={{ marginBottom: 14 }}>
+          <div className="brand">
+            LoRA Data Builder
+            <small style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {activeProject.name}
+            </small>
+          </div>
+          <button
+            className="btn small ghost"
+            style={{ width: "100%", marginTop: 6, justifyContent: "center" }}
+            onClick={() => { setActiveProject(null); setStats(null); }}
+          >
+            ⇠ All projects
+          </button>
         </div>
+
         {NAV.map((n) => (
           <div
             key={n.id}
@@ -67,10 +124,13 @@ function Shell() {
             <span style={{ width: 16, textAlign: "center" }}>{n.icon}</span>
             {n.label}
             {n.id === "review" && stats && stats.by_status.pending_review ? (
-              <span className="badge amber">{stats.by_status.pending_review}</span>
+              <span className="badge amber" style={{ marginLeft: "auto" }}>
+                {stats.by_status.pending_review}
+              </span>
             ) : null}
           </div>
         ))}
+
         <div className="spacer" />
         <div className="muted" style={{ fontSize: 11, padding: "0 8px" }}>
           {stats ? `${stats.samples} samples · ${stats.approved_pct}% approved` : ""}
@@ -79,22 +139,30 @@ function Shell() {
 
       <main className="main">
         {view === "dashboard" && (
-          <Dashboard project={project} stats={stats} go={setView} />
+          <Dashboard project={activeProject} stats={stats} go={setView} />
         )}
         {view === "sources" && (
-          <Sources project={project} onChanged={onChanged} />
+          <Sources project={activeProject} onChanged={onChanged} />
         )}
         {view === "configure" && (
-          <Configure project={project} meta={meta} onSaved={setProject} />
+          <Configure
+            project={activeProject}
+            meta={meta}
+            onSaved={(p) => { setActiveProject(p); }}
+          />
         )}
         {view === "run" && (
-          <RunMonitor project={project} onChanged={onChanged} goReview={() => setView("review")} />
+          <RunMonitor
+            project={activeProject}
+            onChanged={onChanged}
+            goReview={() => setView("review")}
+          />
         )}
         {view === "review" && (
-          <Review project={project} stats={stats} onChanged={onChanged} />
+          <Review project={activeProject} stats={stats} onChanged={onChanged} />
         )}
         {view === "export" && (
-          <ExportPanel project={project} meta={meta} stats={stats} />
+          <ExportPanel project={activeProject} meta={meta} stats={stats} />
         )}
       </main>
     </div>

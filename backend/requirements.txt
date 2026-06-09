@@ -3,15 +3,19 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 
-# Database
+# Config
+python-dotenv==1.0.1
+
+# Database — PostgreSQL
 sqlalchemy==2.0.36
-aiosqlite==0.20.0
+asyncpg==0.30.0
 
 # Validation
 pydantic==2.10.4
 
 # Source ingestion
 pypdf==5.1.0
+python-docx==1.1.2
 trafilatura==2.0.0
 httpx==0.28.1
 

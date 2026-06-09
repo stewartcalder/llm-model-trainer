@@ -1,19 +1,29 @@
-"""Source ingestion endpoints: PDF upload, URL add, list, delete (spec 5.1 / 8.2)."""
+"""Source ingestion endpoints: file upload (PDF/DOCX/TXT/MD), URL add, list, delete."""
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import models, schemas
 from ..config import UPLOAD_DIR
 from ..database import get_session
+from ..ingest import SUPPORTED_EXTENSIONS
 from ..serialize import source_out
 
 router = APIRouter(prefix="/api/projects/{project_id}/sources", tags=["sources"])
+
+# Mime-type → source type label used in the DB.
+_EXT_TO_TYPE: dict[str, str] = {
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".txt": "txt",
+    ".md": "md",
+    ".markdown": "md",
+}
 
 
 async def _counts(db: AsyncSession, source_id: str) -> tuple[int, int]:
@@ -56,7 +66,7 @@ async def add_url(project_id: str, payload: schemas.UrlSourceCreate,
         )
     )
     if dup:
-        raise HTTPException(409, "This URL is already a source in the project.")
+        raise HTTPException(409, "This URL is already a source in this project.")
     src = models.Source(
         project_id=project_id, type="url", path_or_url=url,
         title=(payload.title or "").strip(), status="pending",
@@ -68,19 +78,26 @@ async def add_url(project_id: str, payload: schemas.UrlSourceCreate,
 
 
 @router.post("/upload", response_model=list[schemas.SourceOut])
-async def upload_pdfs(project_id: str, files: list[UploadFile] = File(...),
-                      db: AsyncSession = Depends(get_session)):
+async def upload_files(project_id: str, files: list[UploadFile] = File(...),
+                       db: AsyncSession = Depends(get_session)):
     project = await db.get(models.Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
 
     saved: list[schemas.SourceOut] = []
+
     for upload in files:
+        filename = upload.filename or ""
+        ext = Path(filename).suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            continue  # silently skip unsupported types
+
         data = await upload.read()
         if not data:
             continue
+
         digest = hashlib.sha256(data).hexdigest()
-        # Hash-based dedup at ingest (spec S6).
+        # Content-hash dedup within the project (spec S6).
         dup = await db.scalar(
             select(models.Source).where(
                 models.Source.project_id == project_id,
@@ -89,16 +106,24 @@ async def upload_pdfs(project_id: str, files: list[UploadFile] = File(...),
         )
         if dup:
             continue
-        dest = Path(UPLOAD_DIR) / f"{digest[:16]}-{Path(upload.filename).name}"
+
+        dest = Path(UPLOAD_DIR) / f"{digest[:16]}-{filename}"
         dest.write_bytes(data)
+
+        src_type = _EXT_TO_TYPE.get(ext, ext.lstrip("."))
         src = models.Source(
-            project_id=project_id, type="pdf", path_or_url=str(dest),
-            title=Path(upload.filename).stem, status="pending", content_hash=digest,
+            project_id=project_id,
+            type=src_type,
+            path_or_url=str(dest),
+            title=Path(filename).stem,
+            status="pending",
+            content_hash=digest,
         )
         db.add(src)
         await db.commit()
         await db.refresh(src)
         saved.append(source_out(src, 0, 0))
+
     return saved
 
 
@@ -107,8 +132,8 @@ async def delete_source(project_id: str, source_id: str, db: AsyncSession = Depe
     src = await db.get(models.Source, source_id)
     if not src or src.project_id != project_id:
         raise HTTPException(404, "Source not found")
-    # Remove uploaded file from disk for PDFs.
-    if src.type == "pdf":
+    # Remove uploaded file from disk for file-based sources.
+    if src.type != "url":
         try:
             Path(src.path_or_url).unlink(missing_ok=True)
         except OSError:

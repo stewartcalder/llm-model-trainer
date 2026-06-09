@@ -29,8 +29,15 @@ export const api = {
   // Projects
   listProjects: () => req<Project[]>("/projects"),
   getProject: (id: string) => req<Project>(`/projects/${id}`),
-  updateProject: (id: string, body: { name?: string; config?: Partial<PipelineConfig> }) =>
+  createProject: (name: string, description = "") =>
+    req<Project>("/projects", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    }),
+  updateProject: (id: string, body: { name?: string; description?: string; config?: Partial<PipelineConfig> }) =>
     req<Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteProject: (id: string) =>
+    req<{ ok: boolean }>(`/projects/${id}`, { method: "DELETE" }),
 
   // Sources
   listSources: (pid: string) => req<Source[]>(`/projects/${pid}/sources`),
@@ -39,7 +46,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url, title }),
     }),
-  uploadPdfs: async (pid: string, files: FileList) => {
+  uploadFiles: async (pid: string, files: FileList) => {
     const form = new FormData();
     Array.from(files).forEach((f) => form.append("files", f));
     const res = await fetch(`${BASE}/projects/${pid}/sources/upload`, {

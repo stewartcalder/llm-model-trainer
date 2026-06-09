@@ -16,10 +16,11 @@ def load_json(text: str | None, default: Any) -> Any:
         return default
 
 
-def project_out(p: models.Project) -> schemas.ProjectOut:
+def project_out(p: models.Project, source_count: int = 0, sample_count: int = 0) -> schemas.ProjectOut:
     return schemas.ProjectOut(
-        id=p.id, name=p.name, created_at=p.created_at,
-        config=load_json(p.config_json, {}),
+        id=p.id, name=p.name, description=p.description or "",
+        created_at=p.created_at, config=load_json(p.config_json, {}),
+        source_count=source_count, sample_count=sample_count,
     )
 
 

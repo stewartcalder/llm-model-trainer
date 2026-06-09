@@ -16,7 +16,7 @@ from . import models
 from .chunking import sentence_window_chunks
 from .config import price_for_model
 from .database import SessionLocal
-from .ingest import extract_pdf, extract_url
+from .ingest import extract_file, extract_url
 from .llm import complete_json, make_provider
 from .prompts import DEFAULT_TEMPLATES
 
@@ -106,13 +106,11 @@ async def _ingest_sources(ctx: RunContext, project_id: str) -> None:
             db_src.status = "processing"
             await db.commit()
         try:
-            # Extraction is blocking; run in a thread.
-            if src.type == "pdf":
-                doc = await asyncio.to_thread(extract_pdf, src.path_or_url)
-            elif src.type == "url":
+            # Extraction is blocking I/O — run in a thread.
+            if src.type == "url":
                 doc = await asyncio.to_thread(extract_url, src.path_or_url)
             else:
-                raise ValueError(f"Unsupported source type: {src.type}")
+                doc = await asyncio.to_thread(extract_file, src.path_or_url)
 
             chunk_rows: list[models.Chunk] = []
             for label, text in doc.sections:

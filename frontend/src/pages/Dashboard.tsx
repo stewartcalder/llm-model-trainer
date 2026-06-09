@@ -30,7 +30,7 @@ export default function Dashboard({ project, stats, go }: Props) {
     <div>
       <h1 className="page-title">{project.name}</h1>
       <p className="page-sub">
-        Turn curated sources into a fine-tuning dataset — ingest, generate, review, export.
+        {project.description || "Turn curated sources into a fine-tuning dataset — ingest, generate, review, export."}
       </p>
 
       <div className="grid cols-4" style={{ marginBottom: 16 }}>

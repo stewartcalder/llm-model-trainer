@@ -3,6 +3,10 @@ import { api } from "../api";
 import type { Chunk, Project, Source } from "../types";
 import { Badge, useToast } from "../ui";
 
+const TYPE_ICON: Record<string, string> = {
+  pdf: "📄", docx: "📝", txt: "📃", md: "📋", url: "🔗",
+};
+
 export default function Sources({ project, onChanged }: { project: Project; onChanged: () => void }) {
   const [sources, setSources] = useState<Source[]>([]);
   const [url, setUrl] = useState("");
@@ -36,10 +40,13 @@ export default function Sources({ project, onChanged }: { project: Project; onCh
     if (!files || files.length === 0) return;
     setBusy(true);
     try {
-      const added = await api.uploadPdfs(project.id, files);
+      const added = await api.uploadFiles(project.id, files);
       await load();
       onChanged();
-      toast(`${added.length} PDF(s) added${added.length === 0 ? " (duplicates skipped)" : ""}.`);
+      const msg = added.length === 0
+        ? "No new files added (duplicates skipped or unsupported type)."
+        : `${added.length} file(s) added.`;
+      toast(msg);
     } catch (e) {
       toast((e as Error).message, true);
     } finally {
@@ -74,12 +81,14 @@ export default function Sources({ project, onChanged }: { project: Project; onCh
           onDrop={(e) => { e.preventDefault(); setDrag(false); upload(e.dataTransfer.files); }}
         >
           <div style={{ fontSize: 22, marginBottom: 6 }}>⤓</div>
-          <div><strong>Drop PDF files</strong> or click to browse</div>
-          <div style={{ fontSize: 12, marginTop: 4 }}>Duplicate files are skipped automatically</div>
+          <div><strong>Drop files</strong> or click to browse</div>
+          <div style={{ fontSize: 12, marginTop: 4 }}>
+            PDF · DOCX · TXT · MD — duplicates skipped automatically
+          </div>
           <input
             ref={fileRef}
             type="file"
-            accept="application/pdf"
+            accept=".pdf,.docx,.txt,.md,.markdown"
             multiple
             style={{ display: "none" }}
             onChange={(e) => upload(e.target.files)}
@@ -126,7 +135,11 @@ export default function Sources({ project, onChanged }: { project: Project; onCh
                       <div className="mono muted" style={{ fontSize: 11 }}>{s.path_or_url}</div>
                       {s.error && <div className="badge red" style={{ marginTop: 4 }}>{s.error}</div>}
                     </td>
-                    <td><span className="badge blue">{s.type}</span></td>
+                    <td>
+                      <span className="badge blue">
+                        {TYPE_ICON[s.type] || "📁"} {s.type}
+                      </span>
+                    </td>
                     <td><Badge status={s.status} /></td>
                     <td>{s.chunk_count}</td>
                     <td>{s.sample_count}</td>

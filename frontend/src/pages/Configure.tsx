@@ -21,6 +21,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export default function Configure({ project, meta, onSaved }: Props) {
   const [cfg, setCfg] = useState<PipelineConfig>(structuredClone(project.config));
   const [name, setName] = useState(project.name);
+  const [desc, setDesc] = useState(project.description);
   const [saving, setSaving] = useState(false);
   const [editingTemplates, setEditingTemplates] = useState(false);
   const toast = useToast();
@@ -44,7 +45,7 @@ export default function Configure({ project, meta, onSaved }: Props) {
   const save = async () => {
     setSaving(true);
     try {
-      const updated = await api.updateProject(project.id, { name, config: cfg });
+      const updated = await api.updateProject(project.id, { name, description: desc, config: cfg });
       onSaved(updated);
       toast("Pipeline configuration saved.");
     } catch (e) {
@@ -65,6 +66,11 @@ export default function Configure({ project, meta, onSaved }: Props) {
         <label className="field">
           <span>Project name</span>
           <input type="text" value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        <label className="field">
+          <span>Description</span>
+          <textarea rows={2} value={desc} onChange={(e) => setDesc(e.target.value)}
+            placeholder="What will this model be trained to do?" />
         </label>
       </Section>
 

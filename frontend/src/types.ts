@@ -1,8 +1,11 @@
 export interface Project {
   id: string;
   name: string;
+  description: string;
   created_at: string;
   config: PipelineConfig;
+  source_count: number;
+  sample_count: number;
 }
 
 export interface PipelineConfig {

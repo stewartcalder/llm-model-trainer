@@ -10,18 +10,23 @@ from pydantic import BaseModel, Field
 # ---- Projects ----
 class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
+    description: str = ""
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
+    description: str | None = None
     config: dict[str, Any] | None = None
 
 
 class ProjectOut(BaseModel):
     id: str
     name: str
+    description: str
     created_at: datetime
     config: dict[str, Any]
+    source_count: int = 0
+    sample_count: int = 0
 
 
 # ---- Sources ----
