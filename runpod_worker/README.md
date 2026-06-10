@@ -12,11 +12,19 @@ This directory contains the serverless handler for LoRA / QLoRA fine-tuning on R
 
 ### 1. Build and push the Docker image
 
+The Dockerfile's `COPY` paths are relative to the **repo root** (so RunPod's
+GitHub build, which uses the repo root as context, works). Build from the repo
+root and point `-f` at the Dockerfile:
+
 ```bash
-cd runpod_worker
-docker build -t your-dockerhub-username/lora-trainer:latest .
+# from the repository root
+docker build -f runpod_worker/Dockerfile -t your-dockerhub-username/lora-trainer:latest .
 docker push your-dockerhub-username/lora-trainer:latest
 ```
+
+> **Using RunPod's GitHub integration instead?** You don't build locally at all —
+> point the endpoint at this repo with Dockerfile path `runpod_worker/Dockerfile`
+> and RunPod builds it (repo root is the context automatically).
 
 ### 2. Create a RunPod Serverless endpoint
 
