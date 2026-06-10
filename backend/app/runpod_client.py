@@ -9,8 +9,10 @@ from typing import Any
 
 import httpx
 
+# GraphQL (GPU queries) lives on api.runpod.io; the serverless REST API
+# (/run, /status, /health, /cancel) lives on api.runpod.AI — different host.
 GRAPHQL_URL = "https://api.runpod.io/graphql"
-REST_BASE = "https://api.runpod.io/v2"
+REST_BASE = "https://api.runpod.ai/v2"
 
 
 def _api_key() -> str:
