@@ -1,10 +1,14 @@
+# Upper bounds pin the stack to the major versions this handler targets.
+# Without them pip grabs the latest majors (transformers 5.x, trl 1.x), whose
+# SFTTrainer/SFTConfig API differs and breaks training at runtime.
 runpod>=1.6.0
+# torch is provided by the runpod/pytorch base image (2.4.x) — do not override.
 torch>=2.2.0
-transformers>=4.45.0
-peft>=0.13.0
-trl>=0.12.0
-datasets>=3.0.0
-accelerate>=0.34.0
+transformers>=4.45.0,<5.0
+peft>=0.13.0,<0.16
+trl>=0.12.0,<0.16
+datasets>=3.0.0,<4.0
+accelerate>=0.34.0,<2.0
 bitsandbytes>=0.44.0
 safetensors>=0.4.0
-huggingface_hub>=0.25.0
+huggingface_hub>=0.25.0,<1.0
