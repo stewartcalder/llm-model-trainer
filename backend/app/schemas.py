@@ -160,7 +160,8 @@ class TrainingConfig(BaseModel):
     use_4bit: bool = True
     dataset_format: str = "alpaca"               # alpaca | sharegpt | openai
     include_statuses: list[str] = ["approved"]
-    # Local-only fields
+    # GGUF / Ollama fields (used by both local and RunPod providers — RunPod
+    # now exports the GGUF on the GPU and the backend runs `ollama create`).
     gguf_quantization: str = "q4_k_m"           # q4_k_m | q5_k_m | q8_0 | f16
     ollama_model_name: str = ""                  # name to register in local Ollama
 

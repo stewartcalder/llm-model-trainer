@@ -310,9 +310,14 @@ async def get_job(project_id: str, job_id: str, db: AsyncSession = Depends(get_s
     if job.runpod_job_id and job.status in ("queued", "running", "IN_QUEUE", "IN_PROGRESS"):
         try:
             rp = await job_status(job.runpod_job_id)
-            _sync_runpod_status(job, (rp.get("status") or "").upper(), rp)
+            import_spec = _sync_runpod_status(job, (rp.get("status") or "").upper(), rp)
             await db.commit()
             await db.refresh(job)
+            # Heavy GGUF download + `ollama create` runs in a background thread so
+            # it never blocks this poll request. The job sits in "importing" until
+            # the thread flips it to completed/failed via its own (psycopg2) writes.
+            if import_spec is not None:
+                _launch_bg(_import_runpod_gguf(job.id, *import_spec))
         except Exception as exc:  # noqa: BLE001
             job.log += f"\n[{_now().isoformat()}] Status poll error: {exc}"
             await db.commit()
@@ -320,7 +325,24 @@ async def get_job(project_id: str, job_id: str, db: AsyncSession = Depends(get_s
     return _job_out(job)
 
 
-def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> None:
+# Keep references to background import tasks so they are not garbage-collected.
+_bg_tasks: set = set()
+
+
+def _launch_bg(coro) -> None:
+    import asyncio
+    task = asyncio.create_task(coro)
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+
+
+def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict):
+    """Map RunPod status onto the job and handle the returned output.
+
+    Returns an import spec tuple (repo_id, gguf_filename, ollama_name) when the
+    worker produced a GGUF that should be downloaded + registered with Ollama in
+    the background; otherwise None.
+    """
     status_map = {
         "IN_QUEUE": "queued", "IN_PROGRESS": "running",
         "COMPLETED": "completed", "FAILED": "failed",
@@ -332,11 +354,23 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> No
         job.status = new_status
 
     output = rp.get("output") or {}
+    import_spec = None
     if isinstance(output, dict):
         if output.get("log"):
             job.log += f"\n{output['log']}"
-        if new_status == "completed" and output.get("adapter_repo"):
-            # Worker uploaded the adapter to a (private) HF repo — download it.
+
+        if new_status == "completed" and output.get("gguf_repo"):
+            # Worker exported a GGUF and uploaded it. Defer the (large) download
+            # and `ollama create` to a background thread; mark as importing.
+            job.status = "importing"
+            job.log += (f"\n[{_now().isoformat()}] GGUF ready in '{output['gguf_repo']}' — "
+                        f"downloading and registering with Ollama…")
+            import_spec = (output["gguf_repo"], output["gguf_filename"],
+                           output.get("ollama_model_name") or "")
+
+        elif new_status == "completed" and output.get("adapter_repo"):
+            # Adapter-only result (GGUF export disabled/failed). Download inline —
+            # adapter files are small. Model is NOT auto-registered in Ollama.
             out_dir = Path(EXPORT_DIR) / "models" / job.id
             out_dir.mkdir(parents=True, exist_ok=True)
             repo_id = output["adapter_repo"]
@@ -346,10 +380,11 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> No
                 snapshot_download(repo_id=repo_id, repo_type="model",
                                   local_dir=str(out_dir), token=token)
                 job.model_path = str(out_dir)
-                job.log += f"\n[{_now().isoformat()}] Adapter downloaded from HF repo '{repo_id}' → {out_dir}"
+                job.log += f"\n[{_now().isoformat()}] Adapter downloaded from '{repo_id}' → {out_dir}"
             except Exception as exc:  # noqa: BLE001
-                job.log += (f"\n[{_now().isoformat()}] Adapter is in HF repo '{repo_id}' but "
-                            f"download failed: {exc}. Set HF_TOKEN in backend/.env to fetch it.")
+                job.log += (f"\n[{_now().isoformat()}] Adapter is in '{repo_id}' but download "
+                            f"failed: {exc}. Set HF_TOKEN in backend/.env to fetch it.")
+
         elif new_status == "completed" and output.get("model_files"):
             out_dir = Path(EXPORT_DIR) / "models" / job.id
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -358,8 +393,55 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> No
             job.model_path = str(out_dir)
             job.log += f"\n[{_now().isoformat()}] Adapter saved to {out_dir}"
 
-    if new_status in ("completed", "failed", "cancelled") and not job.finished_at:
+    if job.status in ("completed", "failed", "cancelled") and not job.finished_at:
         job.finished_at = _now()
+    return import_spec
+
+
+async def _import_runpod_gguf(job_id: str, repo_id: str, gguf_filename: str, ollama_name: str) -> None:
+    """Download the worker's GGUF from HF and register it with local Ollama.
+
+    Runs the blocking download + `ollama create` in a thread and writes status
+    via psycopg2 (same pattern as local training), so the event loop is free.
+    """
+    import asyncio
+    await asyncio.to_thread(_import_runpod_gguf_blocking, job_id, repo_id, gguf_filename, ollama_name)
+
+
+def _import_runpod_gguf_blocking(job_id: str, repo_id: str, gguf_filename: str, ollama_name: str) -> None:
+    import subprocess
+    from ..local_trainer import _update_job  # psycopg2-based, thread-safe
+
+    def _log(msg: str) -> None:
+        _update_job(job_id, log_append=f"\n[{_now().isoformat()}] {msg}")
+
+    out_dir = Path(EXPORT_DIR) / "models" / job_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        from huggingface_hub import hf_hub_download
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        _log(f"Downloading {gguf_filename} from '{repo_id}'…")
+        gguf_path = hf_hub_download(repo_id=repo_id, filename=gguf_filename, repo_type="model",
+                                    local_dir=str(out_dir), token=token)
+
+        if ollama_name:
+            modelfile = out_dir / "Modelfile"
+            modelfile.write_text(f"FROM {Path(gguf_path).absolute()}\n")
+            _log(f"Running: ollama create {ollama_name}")
+            proc = subprocess.run(["ollama", "create", ollama_name, "-f", str(modelfile)],
+                                  capture_output=True, text=True, timeout=900)
+            if proc.returncode != 0:
+                raise RuntimeError(f"ollama create failed: {proc.stderr.strip()}")
+            _update_job(job_id, status="completed", model_path=str(out_dir), finished=True,
+                        log_append=f"\n[{_now().isoformat()}] Ollama model '{ollama_name}' is ready — "
+                                   f"try: ollama run {ollama_name}")
+        else:
+            _update_job(job_id, status="completed", model_path=str(out_dir), finished=True,
+                        log_append=f"\n[{_now().isoformat()}] GGUF downloaded to {out_dir} "
+                                   f"(no Ollama name set).")
+    except Exception as exc:  # noqa: BLE001
+        _update_job(job_id, status="failed", finished=True,
+                    log_append=f"\n[{_now().isoformat()}] Ollama import failed: {exc}")
 
 
 @router.post("/jobs/{job_id}/cancel")

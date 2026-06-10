@@ -29,7 +29,9 @@ const DEFAULT_CFG: TrainingConfig = {
   ollama_model_name: "",
 };
 
-const ACTIVE_STATUSES = ["queued", "running", "IN_QUEUE", "IN_PROGRESS"];
+// "importing" = RunPod finished; backend is downloading the GGUF + running
+// `ollama create`. Keep polling so the UI sees the final completed/failed.
+const ACTIVE_STATUSES = ["queued", "running", "IN_QUEUE", "IN_PROGRESS", "importing"];
 
 // ── Small helpers ─────────────────────────────────────────────────────────────
 

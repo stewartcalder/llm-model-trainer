@@ -29,7 +29,7 @@ Returns:
 }
 """
 
-import base64, json, os, sys, tempfile, traceback
+import base64, json, os, subprocess, sys, tempfile, traceback
 from pathlib import Path
 import runpod
 
@@ -129,9 +129,81 @@ def _train(cfg: dict, dataset) -> tuple[str, str]:
     trainer.train()
     trainer.save_model(output_dir)
 
-    return output_dir, "\n".join(
-        [f"step {e['step']}: loss={e.get('loss', '?')}" for e in trainer.state.log_history if "loss" in e]
+    log = "\n".join(
+        f"step {e['step']}: loss={e.get('loss', '?')}"
+        for e in trainer.state.log_history if "loss" in e
     )
+
+    # Free the 4-bit training model before the fp16 merge reloads the base.
+    del trainer, model
+    torch.cuda.empty_cache()
+
+    return output_dir, log
+
+
+# ── GGUF export (runs on the RunPod GPU) ──────────────────────────────────────
+
+_LLAMA_DIR = os.environ.get("LLAMA_CPP_DIR", "/opt/llama.cpp")
+
+
+def _export_gguf(cfg: dict, adapter_dir: str, work_dir: str) -> str:
+    """Merge the LoRA adapter into a fresh fp16 base, convert to GGUF and
+    quantise. Returns the path to the quantised .gguf.
+
+    Reloads the base model in fp16 (not 4-bit) so merge_and_unload yields clean
+    fp16 weights — no bitsandbytes dequant artefacts. Intermediate files are
+    deleted aggressively to stay within the container disk budget.
+    """
+    import shutil
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
+    base_model = cfg["base_model"]
+    quant = cfg.get("gguf_quantization", "q4_k_m")
+    merged_dir = os.path.join(work_dir, "merged")
+    os.makedirs(merged_dir, exist_ok=True)
+
+    print(f"[gguf] reloading base {base_model} in fp16 and merging adapter…")
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True,
+    )
+    merged = PeftModel.from_pretrained(base, adapter_dir).merge_and_unload()
+    merged.save_pretrained(merged_dir, safe_serialization=True, max_shard_size="5GB")
+    AutoTokenizer.from_pretrained(base_model, trust_remote_code=True).save_pretrained(merged_dir)
+    del merged, base
+    torch.cuda.empty_cache()
+
+    # Free the base model from the HF cache to reclaim ~disk before conversion.
+    try:
+        from huggingface_hub import scan_cache_dir
+        for repo in scan_cache_dir().repos:
+            if repo.repo_id == base_model:
+                scan_cache_dir().delete_revisions(
+                    *[rev.commit_hash for rev in repo.revisions]
+                ).execute()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[gguf] cache cleanup skipped: {exc}")
+
+    converter = os.path.join(_LLAMA_DIR, "convert_hf_to_gguf.py")
+    quantizer = os.path.join(_LLAMA_DIR, "build", "bin", "llama-quantize")
+    f16_gguf = os.path.join(work_dir, "model-f16.gguf")
+    out_gguf = os.path.join(work_dir, f"model-{quant}.gguf")
+
+    print("[gguf] converting merged model → f16 GGUF…")
+    subprocess.run(
+        [sys.executable, converter, merged_dir, "--outfile", f16_gguf, "--outtype", "f16"],
+        check=True,
+    )
+    shutil.rmtree(merged_dir, ignore_errors=True)   # free ~fp16 shards
+
+    print(f"[gguf] quantising → {quant}…")
+    subprocess.run([quantizer, f16_gguf, out_gguf, quant.upper()], check=True)
+    os.remove(f16_gguf)                              # free the f16 intermediate
+
+    size_mb = os.path.getsize(out_gguf) / (1024 * 1024)
+    print(f"[gguf] ready: {os.path.basename(out_gguf)} ({size_mb:.0f} MB)")
+    return out_gguf
 
 
 def handler(event: dict) -> dict:
@@ -151,47 +223,68 @@ def handler(event: dict) -> dict:
         output_dir, log = _train(cfg, dataset)
         print(f"[handler] training done, saved to {output_dir}")
 
-        # ── Return the adapter ───────────────────────────────────────────────
-        # Large adapters (e.g. 14B LoRA ≈ 140 MB → ~190 MB base64) can exceed
-        # RunPod's job-output size limit. If an HF write token + target repo are
-        # configured on the endpoint, upload there and return the repo id instead
-        # of inlining the bytes. Otherwise fall back to base64 (fine for ≤7B).
         hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
         # Repo can be set per-job (config.hf_upload_repo) or per-endpoint (env).
         hf_repo = cfg.get("hf_upload_repo") or os.environ.get("HF_UPLOAD_REPO")
 
-        total_mb = sum(
+        adapter_mb = sum(
             f.stat().st_size for f in Path(output_dir).iterdir() if f.is_file()
         ) / (1024 * 1024)
-        print(f"[handler] adapter size: {total_mb:.1f} MB")
+        print(f"[handler] adapter size: {adapter_mb:.1f} MB")
 
+        result: dict = {"log": log, "adapter_size_mb": round(adapter_mb, 1)}
+
+        # ── Upload the adapter (always — cheap insurance so a GGUF failure does
+        #    not waste the training run). Needs HF token + repo. ──────────────
+        api = None
         if hf_token and hf_repo:
             from huggingface_hub import HfApi
             api = HfApi(token=hf_token)
             print(f"[handler] uploading adapter to HF repo '{hf_repo}' (private)…")
             api.create_repo(hf_repo, private=True, exist_ok=True, repo_type="model")
-            api.upload_folder(
-                folder_path=output_dir,
-                repo_id=hf_repo,
-                repo_type="model",
-                commit_message="LoRA adapter (trained on RunPod)",
-            )
-            print("[handler] upload complete")
-            return {"adapter_repo": hf_repo, "adapter_size_mb": round(total_mb, 1), "log": log}
+            api.upload_folder(folder_path=output_dir, repo_id=hf_repo, repo_type="model",
+                              path_in_repo="adapter", commit_message="LoRA adapter (RunPod)")
+            result["adapter_repo"] = hf_repo
 
-        # Fallback: base64-encode adapter files into the job output.
-        if total_mb > 50:
-            print(
-                f"[handler] WARNING: adapter is {total_mb:.0f} MB and no HF_TOKEN/"
-                "HF_UPLOAD_REPO is set — base64 return may exceed RunPod's output "
-                "limit. Set HF_TOKEN + HF_UPLOAD_REPO on the endpoint to avoid this."
-            )
+        # ── GGUF export on the GPU, then upload the .gguf (default on). ───────
+        # The backend downloads the .gguf and runs `ollama create` locally, so a
+        # RunPod run lands in Ollama exactly like a local build.
+        if cfg.get("export_gguf", True) and api is not None:
+            try:
+                gguf_path = _export_gguf(cfg, output_dir, output_dir)
+                gguf_name = os.path.basename(gguf_path)
+                gguf_mb = os.path.getsize(gguf_path) / (1024 * 1024)
+                print(f"[handler] uploading {gguf_name} ({gguf_mb:.0f} MB) to '{hf_repo}'…")
+                api.upload_file(path_or_fileobj=gguf_path, path_in_repo=gguf_name,
+                                repo_id=hf_repo, repo_type="model",
+                                commit_message="GGUF (RunPod)")
+                result.update({
+                    "gguf_repo": hf_repo,
+                    "gguf_filename": gguf_name,
+                    "gguf_size_mb": round(gguf_mb, 1),
+                    "ollama_model_name": cfg.get("ollama_model_name") or "",
+                })
+                result["log"] += f"\n[gguf] exported {gguf_name} ({gguf_mb:.0f} MB)"
+            except Exception as exc:  # noqa: BLE001
+                tb = traceback.format_exc()
+                print(f"[handler] GGUF export failed (adapter still saved):\n{tb}", file=sys.stderr)
+                result["gguf_error"] = str(exc)
+                result["log"] += f"\n[gguf] export FAILED: {exc} (adapter is still in '{hf_repo}/adapter')"
+            return result
+
+        if api is not None:
+            return result
+
+        # ── No HF repo configured: base64 the adapter into the job output. ───
+        if adapter_mb > 50:
+            print(f"[handler] WARNING: adapter is {adapter_mb:.0f} MB and no HF_TOKEN/"
+                  "HF_UPLOAD_REPO is set — base64 return may exceed RunPod's output limit.")
         model_files: dict[str, str] = {}
         for fpath in Path(output_dir).iterdir():
             if fpath.is_file():
                 model_files[fpath.name] = base64.b64encode(fpath.read_bytes()).decode()
-
-        return {"model_files": model_files, "adapter_size_mb": round(total_mb, 1), "log": log}
+        result["model_files"] = model_files
+        return result
 
     except Exception as exc:
         tb = traceback.format_exc()

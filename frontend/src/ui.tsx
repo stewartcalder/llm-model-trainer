@@ -73,6 +73,7 @@ const STATUS_CLASS: Record<string, string> = {
   approved: "green",
   processing: "blue",
   running: "blue",
+  importing: "blue",
   edited: "blue",
   pending: "amber",
   pending_review: "amber",
