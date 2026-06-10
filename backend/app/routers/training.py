@@ -335,7 +335,22 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict) -> No
     if isinstance(output, dict):
         if output.get("log"):
             job.log += f"\n{output['log']}"
-        if new_status == "completed" and output.get("model_files"):
+        if new_status == "completed" and output.get("adapter_repo"):
+            # Worker uploaded the adapter to a (private) HF repo — download it.
+            out_dir = Path(EXPORT_DIR) / "models" / job.id
+            out_dir.mkdir(parents=True, exist_ok=True)
+            repo_id = output["adapter_repo"]
+            try:
+                from huggingface_hub import snapshot_download
+                token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+                snapshot_download(repo_id=repo_id, repo_type="model",
+                                  local_dir=str(out_dir), token=token)
+                job.model_path = str(out_dir)
+                job.log += f"\n[{_now().isoformat()}] Adapter downloaded from HF repo '{repo_id}' → {out_dir}"
+            except Exception as exc:  # noqa: BLE001
+                job.log += (f"\n[{_now().isoformat()}] Adapter is in HF repo '{repo_id}' but "
+                            f"download failed: {exc}. Set HF_TOKEN in backend/.env to fetch it.")
+        elif new_status == "completed" and output.get("model_files"):
             out_dir = Path(EXPORT_DIR) / "models" / job.id
             out_dir.mkdir(parents=True, exist_ok=True)
             for fname, b64_content in output["model_files"].items():

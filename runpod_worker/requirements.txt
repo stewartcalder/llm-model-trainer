@@ -7,3 +7,4 @@ datasets>=3.0.0
 accelerate>=0.34.0
 bitsandbytes>=0.44.0
 safetensors>=0.4.0
+huggingface_hub>=0.25.0

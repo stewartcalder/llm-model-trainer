@@ -151,13 +151,47 @@ def handler(event: dict) -> dict:
         output_dir, log = _train(cfg, dataset)
         print(f"[handler] training done, saved to {output_dir}")
 
-        # Collect adapter files and base64-encode them.
+        # ── Return the adapter ───────────────────────────────────────────────
+        # Large adapters (e.g. 14B LoRA ≈ 140 MB → ~190 MB base64) can exceed
+        # RunPod's job-output size limit. If an HF write token + target repo are
+        # configured on the endpoint, upload there and return the repo id instead
+        # of inlining the bytes. Otherwise fall back to base64 (fine for ≤7B).
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        # Repo can be set per-job (config.hf_upload_repo) or per-endpoint (env).
+        hf_repo = cfg.get("hf_upload_repo") or os.environ.get("HF_UPLOAD_REPO")
+
+        total_mb = sum(
+            f.stat().st_size for f in Path(output_dir).iterdir() if f.is_file()
+        ) / (1024 * 1024)
+        print(f"[handler] adapter size: {total_mb:.1f} MB")
+
+        if hf_token and hf_repo:
+            from huggingface_hub import HfApi
+            api = HfApi(token=hf_token)
+            print(f"[handler] uploading adapter to HF repo '{hf_repo}' (private)…")
+            api.create_repo(hf_repo, private=True, exist_ok=True, repo_type="model")
+            api.upload_folder(
+                folder_path=output_dir,
+                repo_id=hf_repo,
+                repo_type="model",
+                commit_message="LoRA adapter (trained on RunPod)",
+            )
+            print("[handler] upload complete")
+            return {"adapter_repo": hf_repo, "adapter_size_mb": round(total_mb, 1), "log": log}
+
+        # Fallback: base64-encode adapter files into the job output.
+        if total_mb > 50:
+            print(
+                f"[handler] WARNING: adapter is {total_mb:.0f} MB and no HF_TOKEN/"
+                "HF_UPLOAD_REPO is set — base64 return may exceed RunPod's output "
+                "limit. Set HF_TOKEN + HF_UPLOAD_REPO on the endpoint to avoid this."
+            )
         model_files: dict[str, str] = {}
         for fpath in Path(output_dir).iterdir():
             if fpath.is_file():
                 model_files[fpath.name] = base64.b64encode(fpath.read_bytes()).decode()
 
-        return {"model_files": model_files, "log": log}
+        return {"model_files": model_files, "adapter_size_mb": round(total_mb, 1), "log": log}
 
     except Exception as exc:
         tb = traceback.format_exc()
