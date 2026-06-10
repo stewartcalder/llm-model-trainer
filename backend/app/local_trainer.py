@@ -242,49 +242,186 @@ def run_local_training(job_id: str, dataset_jsonl: str, config: dict, export_dir
         model.save_pretrained(str(adapter_dir))
         tokenizer.save_pretrained(str(adapter_dir))
 
-        # Merge and export to GGUF for Ollama.
+        # ── GGUF export (zero HuggingFace network traffic) ──────────────────
+        # Strategy: use PEFT's merge_and_unload() which dequantizes the 4-bit
+        # weights already resident in VRAM and merges the LoRA deltas in-place.
+        # The resulting full-precision model is saved with transformers'
+        # save_pretrained (writes the in-memory state dict — no download).
+        # This entirely avoids the ~15 GB fp16 re-download that both
+        # save_pretrained_gguf and save_pretrained_merged(merged_16bit) trigger.
+        import gc
         quant = config.get("gguf_quantization", "q4_k_m")
-        gguf_dir = out_dir / "gguf"
-        gguf_dir.mkdir(parents=True, exist_ok=True)
-        log(f"Merging weights and exporting GGUF ({quant}) — this can take several minutes…")
-        _ensure_llama_cpp(log)
-        # Point HuggingFace at the GLOBAL cache so the fp16 base-model download
-        # (needed for GGUF conversion) is cached across training runs rather than
-        # being re-downloaded into each job's output directory.
-        import os as _os
-        _hf_home = str(Path.home() / ".cache" / "huggingface")
-        _os.environ["HF_HOME"] = _hf_home
-        _os.environ["HUGGINGFACE_HUB_CACHE"] = str(Path(_hf_home) / "hub")
-        log(f"HF cache → {_hf_home}")
-        model.save_pretrained_gguf(str(gguf_dir), tokenizer, quantization_method=quant)
+        merged_dir = out_dir / "merged"
+        gguf_out   = out_dir / "gguf_out"
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        gguf_out.mkdir(parents=True, exist_ok=True)
 
-        # Unsloth appends "_gguf" to the save directory; search there first,
-        # then fall back to a full recursive scan of the job output tree.
-        gguf_actual_dir = Path(str(gguf_dir) + "_gguf")
-        gguf_files = (list(gguf_actual_dir.glob("*.gguf"))
-                      if gguf_actual_dir.exists() else [])
-        if not gguf_files:
-            gguf_files = list(out_dir.rglob("*.gguf"))
-        if not gguf_files:
-            raise RuntimeError("GGUF export produced no .gguf file.")
-        gguf_path = gguf_files[0]
+        # ── Merge LoRA + stream-write shards (low RAM) ──────────────────────────
+        # PEFT's merge_and_unload() leaves bnb tensors (uint8 packed weights,
+        # .absmax) in the state dict — GGUF converter rejects these.  Unsloth's
+        # internal _merge_lora() calls fast_dequantize on each Bnb_Linear4bit
+        # layer, producing clean fp16/bf16 tensors.  We replicate the loop from
+        # unsloth/save.py and flush each shard to disk immediately (≤3 GB) so we
+        # never accumulate the full 14 GB in RAM before writing — which would push
+        # a 15 GB machine into swap and stall for hours.
+        import torch
+        import json as _json
+        import os as _os
+        from safetensors.torch import save_file as _sf_save
+        from peft import PeftModelForCausalLM
+        from unsloth.save import _merge_lora, LLAMA_WEIGHTS, LLAMA_LAYERNORMS
+
+        if isinstance(model, PeftModelForCausalLM):
+            internal_model = model.model
+        else:
+            internal_model = model
+
+        cfg_dtype = getattr(internal_model.config, "torch_dtype", "bfloat16")
+        torch_dtype = torch.bfloat16 if "bfloat16" in str(cfg_dtype) else torch.float16
+        has_lm_head = (
+            internal_model.model.embed_tokens.weight.data_ptr()
+            != internal_model.lm_head.weight.data_ptr()
+        )
+
+        # Capture config before the merge loop frees GPU state
+        cfg_dict = internal_model.config.to_dict()
+        cfg_dict.pop("quantization_config", None)
+
+        SHARD_BYTES = 3 * 1024 ** 3   # flush every 3 GB — keeps peak RAM low
+        cur_shard: dict = {}
+        cur_bytes  = 0
+        part_names: list = []
+        weight_map: dict = {}
+        total_bytes = 0
+
+        def _flush():
+            nonlocal cur_shard, cur_bytes
+            if not cur_shard:
+                return
+            idx  = len(part_names)
+            fname = f"model-part-{idx:05d}.safetensors"
+            log(f"  writing shard {idx + 1} ({cur_bytes // 1024 ** 2} MB)…")
+            _sf_save(cur_shard, str(merged_dir / fname))
+            for k in cur_shard:
+                weight_map[k] = fname
+            part_names.append(fname)
+            cur_shard = {}
+            cur_bytes  = 0
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        def _add(name: str, tensor: torch.Tensor) -> None:
+            nonlocal cur_bytes, total_bytes
+            t = tensor.contiguous().cpu()
+            cur_shard[name] = t
+            cur_bytes  += t.nbytes
+            total_bytes += t.nbytes
+            if cur_bytes >= SHARD_BYTES:
+                _flush()
+
+        log("Merging LoRA layer-by-layer and streaming shards to disk…")
+        _add("model.embed_tokens.weight",
+             internal_model.model.embed_tokens.weight.data.to(torch_dtype))
+
+        n_layers = len(internal_model.model.layers)
+        for j, layer in enumerate(internal_model.model.layers):
+            if j % 4 == 0:
+                log(f"  merging layers {j}–{min(j + 3, n_layers - 1)} / {n_layers}…")
+            for item in LLAMA_WEIGHTS:
+                try:
+                    proj = eval(f"layer.{item}")  # noqa: S307
+                    name = f"model.layers.{j}.{item}.weight"
+                    W, bias = _merge_lora(proj, name)
+                    _add(name, W.to(torch_dtype))
+                    if bias is not None:
+                        _add(f"model.layers.{j}.{item}.bias", bias)
+                except Exception:
+                    pass
+            for item in LLAMA_LAYERNORMS:
+                try:
+                    _add(f"model.layers.{j}.{item}.weight",
+                         eval(f"layer.{item}.weight.data"))  # noqa: S307
+                except Exception:
+                    continue
+
+        _add("model.norm.weight", internal_model.model.norm.weight.data)
+        if has_lm_head:
+            _add("lm_head.weight",
+                 internal_model.lm_head.weight.data.to(torch_dtype))
+
+        _flush()   # write remaining tensors
+
+        # Rename part files to standard HF shard naming
+        n_parts = len(part_names)
+        log(f"Finalising {n_parts} shard(s)…")
+        if n_parts == 1:
+            _os.rename(str(merged_dir / part_names[0]),
+                       str(merged_dir / "model.safetensors"))
+        else:
+            final_map: dict = {}
+            for i, old in enumerate(part_names):
+                new = f"model-{i + 1:05d}-of-{n_parts:05d}.safetensors"
+                _os.rename(str(merged_dir / old), str(merged_dir / new))
+                for k, v in weight_map.items():
+                    if v == old:
+                        final_map[k] = new
+            (merged_dir / "model.safetensors.index.json").write_text(
+                _json.dumps(
+                    {"metadata": {"total_size": total_bytes}, "weight_map": final_map},
+                    indent=2,
+                )
+            )
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        # Config, generation_config, tokenizer
+        (merged_dir / "config.json").write_text(_json.dumps(cfg_dict, indent=2))
+        if hasattr(internal_model, "generation_config"):
+            internal_model.generation_config.save_pretrained(str(merged_dir))
+        _tok = tokenizer.tokenizer if hasattr(tokenizer, "tokenizer") else tokenizer
+        _tok.save_pretrained(str(merged_dir))
+        gc.collect()
+
+        _ensure_llama_cpp(log)
+        llama_dir = Path.home() / ".unsloth" / "llama.cpp"
+        converter  = llama_dir / "convert_hf_to_gguf.py"
+        quantizer  = llama_dir / "llama-quantize"
+
+        # Step 1: convert merged safetensors → f16 GGUF
+        # Use sys.executable so the converter runs in the same venv (has torch, transformers, etc.)
+        import sys
+        f16_gguf = gguf_out / "model-f16.gguf"
+        log("Converting to GGUF (f16)…")
+        proc = subprocess.run(
+            [sys.executable, str(converter), str(merged_dir), "--outfile", str(f16_gguf), "--outtype", "f16"],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"convert_hf_to_gguf failed:\n{proc.stderr[-2000:]}")
+
+        # Step 2: quantise f16 GGUF → target quantisation
+        quant_gguf = gguf_out / f"model-{quant}.gguf"
+        log(f"Quantising to {quant}…")
+        proc = subprocess.run(
+            [str(quantizer), str(f16_gguf), str(quant_gguf), quant.upper()],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"llama-quantize failed:\n{proc.stderr[-2000:]}")
+
+        # Remove the intermediate f16 GGUF to save ~15 GB
+        f16_gguf.unlink(missing_ok=True)
+
+        gguf_path = quant_gguf
         size_mb = gguf_path.stat().st_size // (1024 * 1024)
         log(f"GGUF ready: {gguf_path.name} ({size_mb} MB)")
 
         # Register with local Ollama if the user provided a name.
         ollama_name = (config.get("ollama_model_name") or "").strip()
         if ollama_name:
-            # Prefer Unsloth's generated Modelfile (has full chat template),
-            # but fix the FROM line to an absolute path so ollama create works
-            # from any working directory.
-            modelfile = gguf_path.parent / "Modelfile"
-            if modelfile.exists():
-                lines = modelfile.read_text().splitlines()
-                lines = [f"FROM {gguf_path.absolute()}" if l.startswith("FROM ") else l
-                         for l in lines]
-                modelfile.write_text("\n".join(lines) + "\n")
-            else:
-                modelfile.write_text(f"FROM {gguf_path.absolute()}\n")
+            modelfile = gguf_out / "Modelfile"
+            modelfile.write_text(f"FROM {gguf_path.absolute()}\n")
             log(f"Running: ollama create {ollama_name}")
             proc = subprocess.run(
                 ["ollama", "create", ollama_name, "-f", str(modelfile)],

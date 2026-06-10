@@ -61,9 +61,7 @@ browser
 
 **Local training thread model**: `run_local_training` in `local_trainer.py` is a blocking function run via `asyncio.to_thread`. It uses `psycopg2` (sync) for DB updates and a `threading.Event` in module-level `_cancel_flags` for cancellation. The HuggingFace `TrainerCallback.on_log` checks the event each training step.
 
-**GGUF export directory naming**: Unsloth's `model.save_pretrained_gguf(path, ...)` appends `_gguf` to whatever directory name you pass. The code therefore searches `{path}_gguf/` first, then falls back to `rglob("*.gguf")` across the job tree.
-
-**GGUF export downloads fp16 weights**: `save_pretrained_gguf` downloads the full fp16 base model from HuggingFace (needed for accurate GGUF conversion from a 4-bit-loaded model). `HF_HOME` is explicitly set to `~/.cache/huggingface` before the call so the download is cached globally across runs.
+**GGUF export — zero network traffic**: Both `save_pretrained_gguf` and Unsloth's `save_pretrained_merged(merged_16bit)` secretly download the full fp16 base model from HuggingFace, even when training used 4-bit. The correct approach is PEFT's own `model.merge_and_unload()` which dequantises each bnb-4bit layer already in VRAM, applies the LoRA delta, and returns a standard transformers model — no network access. After that, `merged_model.save_pretrained()` just writes the in-memory state dict. Then `convert_hf_to_gguf.py` (run via `sys.executable` so it finds the venv's torch) + `llama-quantize` handle the GGUF conversion step.
 
 **llama.cpp first-use build**: `_ensure_llama_cpp()` patches `builtins.input` to auto-accept the system-package install prompt (Unsloth calls `input()` outside Colab/Kaggle). `cmake` must be installed on the host (`sudo apt-get install cmake`). The build takes ~10 min the first time; subsequent calls return immediately because `~/.unsloth/llama.cpp` already exists.
 
