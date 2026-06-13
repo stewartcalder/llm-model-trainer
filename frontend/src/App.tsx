@@ -10,12 +10,14 @@ import RunMonitor from "./pages/RunMonitor";
 import Review from "./pages/Review";
 import ExportPanel from "./pages/ExportPanel";
 import Training from "./pages/Training";
+import Tools from "./pages/Tools";
 
-type WorkspaceView = "dashboard" | "sources" | "configure" | "run" | "review" | "export" | "training";
+type WorkspaceView = "dashboard" | "sources" | "configure" | "run" | "review" | "export" | "training" | "tools";
 
 const NAV: { id: WorkspaceView; label: string; icon: string }[] = [
   { id: "dashboard", label: "Dashboard", icon: "▦" },
   { id: "sources", label: "Sources", icon: "▤" },
+  { id: "tools", label: "Tools", icon: "🖱️" },
   { id: "configure", label: "Pipeline", icon: "⚙" },
   { id: "run", label: "Run", icon: "▶" },
   { id: "review", label: "Review", icon: "✓" },
@@ -172,6 +174,9 @@ function Shell() {
         )}
         {view === "training" && (
           <Training project={activeProject} stats={stats} />
+        )}
+        {view === "tools" && (
+          <Tools project={activeProject} />
         )}
       </main>
     </div>

@@ -14,7 +14,7 @@ from .database import get_session, init_db
 from .llm_status import check_llm
 from .prompts import SAMPLE_TYPE_LABELS
 from .routers import exports, projects, runs, samples, sources
-from .routers import training
+from .routers import tools, training
 from .serialize import load_json
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -41,6 +41,7 @@ app.include_router(samples.router)
 app.include_router(runs.router)
 app.include_router(exports.router)
 app.include_router(training.router)
+app.include_router(tools.router)
 
 
 @app.get("/api/health")

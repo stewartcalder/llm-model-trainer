@@ -114,6 +114,34 @@ class Run(Base):
     project: Mapped[Project] = relationship(back_populates="runs")
 
 
+class ScrapeJob(Base):
+    """A screen-text-scraper run: OCRs a screen region in a click-through loop.
+
+    The accumulated OCR text is stored on the row and, on success, written out as
+    a `Source` (type "screen") so it flows into the normal ingest -> chunk ->
+    sample pipeline for LLM training.
+    """
+
+    __tablename__ = "scrape_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    source_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
+    )
+    title: Mapped[str] = mapped_column(String, default="")
+    # queued | running | done | error | cancelled
+    status: Mapped[str] = mapped_column(String, default="queued")
+    config_json: Mapped[str] = mapped_column(Text, default="{}")
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    text: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[Project] = relationship()
+
+
 class TrainingJob(Base):
     """A LoRA fine-tuning job dispatched to a RunPod serverless endpoint."""
 

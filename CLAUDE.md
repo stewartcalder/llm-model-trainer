@@ -48,7 +48,9 @@ browser
        └─ /api/*  ──▶  FastAPI (backend/app/main.py)
                           ├─ routers/projects, sources, samples, runs, exports
                           ├─ routers/training  ←─ local + RunPod training
+                          ├─ routers/tools     ←─ screen-text-scraper
                           ├─ pipeline.py       ←─ ingest→chunk→generate→validate
+                          ├─ screen_scraper.py ←─ screen OCR click-through loop
                           ├─ local_trainer.py  ←─ Unsloth training thread
                           └─ runpod_client.py  ←─ RunPod serverless REST/GraphQL
 ```
@@ -56,6 +58,8 @@ browser
 **Pipeline flow** (data collection): `Sources` tab → add PDFs/URLs → `Configure` tab (chunking, LLM, sample types) → `Run` tab (background asyncio task in `pipeline.py`) → `Review` tab → `Export` tab.
 
 **Training flow**: `Training` tab → choose Local or RunPod provider → pick base model from Ollama table → configure LoRA params → start. Local jobs run via `asyncio.to_thread(run_local_training, ...)` to avoid blocking the event loop.
+
+**Screen-text-scraper flow** (`Tools` tab): capture a screenshot of the host's primary monitor → drag a rectangle over the area text appears in + click where the "next/advance" click should land → Run. `screen_scraper.run_scrape_job` (an asyncio background task) loops: grab region → OCR (`pytesseract`) → append text → pause → mouse click (`pyautogui`) → grab again → if the frame changed (`change_threshold`) repeat, else stop. The combined text is written to `data/uploads/screen-<job>.txt` and registered as a `Source` (type `screen`) so it flows into the normal pipeline. Designed for digitising paginated apps/scanned viewers that aren't otherwise extractable.
 
 ### Key non-obvious design decisions
 
@@ -70,6 +74,8 @@ browser
 **Modelfile absolute path**: Unsloth writes a relative `FROM <filename>` in the Modelfile. Before calling `ollama create`, the code rewrites the `FROM` line to an absolute path so `ollama create` works regardless of working directory.
 
 **RunPod data**: The full training dataset (approved samples) is base64-encoded and sent to RunPod in the job payload. Use local training for any proprietary data.
+
+**Screen scraper runs on the backend host**: screen capture (`mss`), OCR (`pytesseract` + the system `tesseract` binary) and mouse control (`pyautogui`) all act on the machine running the backend, not the browser. The frontend works entirely in *physical* screenshot pixels; `screen_scraper._click` scales them to `pyautogui`'s *logical* coordinate space (`logical_width / physical_width`) to stay correct on HiDPI/scaled displays. These libraries are imported lazily and the backend runs without them — `GET /api/tools/screen-scraper/status` reports what's missing (modules, the tesseract binary, or a usable display) and the Tools tab disables itself accordingly. Install with `sudo apt-get install -y tesseract-ocr && pip install mss pyautogui pytesseract Pillow`.
 
 ### Frontend
 

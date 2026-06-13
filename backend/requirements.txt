@@ -29,6 +29,13 @@ openai==1.59.6
 # Sync DB driver — used by the local training thread (asyncpg is async-only)
 psycopg2-binary==2.9.10
 
+# Screen-text-scraper tool (Tools tab) — install separately if you want it.
+# Needs a graphical display + the tesseract OCR engine on the backend host:
+#   sudo apt-get install -y tesseract-ocr        # or: brew install tesseract
+#   pip install mss pyautogui pytesseract Pillow
+# Imported lazily; the backend runs fine without them (the tool reports as
+# unavailable in the UI).
+
 # Local training (Unsloth + GPU stack) — install separately if you want local training:
 #   pip install unsloth trl>=0.12.0 datasets accelerate bitsandbytes peft safetensors
 # Unsloth requires CUDA and is not listed here to avoid breaking CPU-only installs.

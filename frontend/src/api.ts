@@ -1,6 +1,7 @@
 import type {
   Chunk, DryRun, ExportResult, LocalStatus, LLMStatus, Meta, OllamaModelInfo,
-  PipelineConfig, Project, Run, RunPodStatus, Sample, Source, Stats, TrainingConfig, TrainingJob,
+  PipelineConfig, Project, Run, RunPodStatus, Sample, ScrapeJob, ScrapeStartRequest,
+  ScreenScraperStatus, Source, Stats, TrainingConfig, TrainingJob,
 } from "./types";
 
 const BASE = "/api";
@@ -109,4 +110,15 @@ export const api = {
     req<{ ok: boolean }>(`/projects/${pid}/training/jobs/${jid}/cancel`, { method: "POST" }),
   downloadModelUrl: (pid: string, jid: string) =>
     `${BASE}/projects/${pid}/training/jobs/${jid}/download`,
+
+  // Tools — screen-text-scraper
+  scraperStatus: () => req<ScreenScraperStatus>("/tools/screen-scraper/status"),
+  scraperScreenshotUrl: () => `${BASE}/tools/screen-scraper/screenshot?t=${Date.now()}`,
+  startScrape: (body: ScrapeStartRequest) =>
+    req<ScrapeJob>("/tools/screen-scraper/start", { method: "POST", body: JSON.stringify(body) }),
+  listScrapeJobs: (pid: string) =>
+    req<ScrapeJob[]>(`/tools/screen-scraper/jobs?project_id=${pid}`),
+  getScrapeJob: (jid: string) => req<ScrapeJob>(`/tools/screen-scraper/jobs/${jid}`),
+  cancelScrape: (jid: string) =>
+    req<{ cancelling: boolean }>(`/tools/screen-scraper/jobs/${jid}/cancel`, { method: "POST" }),
 };

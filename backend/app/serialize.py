@@ -42,6 +42,15 @@ def sample_out(s: models.Sample, source: models.Source, chunk_text: str = "") ->
     )
 
 
+def scrape_job_out(j: models.ScrapeJob, include_text: bool = True) -> schemas.ScrapeJobOut:
+    return schemas.ScrapeJobOut(
+        id=j.id, project_id=j.project_id, source_id=j.source_id, title=j.title or "",
+        status=j.status, config=load_json(j.config_json, {}), pages=j.pages,
+        text=(j.text or "") if include_text else "", error=j.error,
+        created_at=j.created_at, finished_at=j.finished_at,
+    )
+
+
 def run_out(r: models.Run) -> schemas.RunOut:
     return schemas.RunOut(
         id=r.id, status=r.status, stage=r.stage, started_at=r.started_at,

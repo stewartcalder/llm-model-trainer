@@ -4,7 +4,7 @@ import type { Chunk, Project, Source } from "../types";
 import { Badge, useToast } from "../ui";
 
 const TYPE_ICON: Record<string, string> = {
-  pdf: "📄", docx: "📝", txt: "📃", md: "📋", url: "🔗",
+  pdf: "📄", docx: "📝", txt: "📃", md: "📋", url: "🔗", screen: "🖱️",
 };
 
 export default function Sources({ project, onChanged }: { project: Project; onChanged: () => void }) {

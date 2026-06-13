@@ -189,3 +189,43 @@ class RunPodStatusOut(BaseModel):
     configured: bool
     endpoint_id: str
     health: dict[str, Any]
+
+
+# ---- Tools: screen-text-scraper ----
+class ScreenScraperStatusOut(BaseModel):
+    available: bool
+    missing: list[str] = []
+    detail: str = ""
+    # Physical (screenshot) and logical (click) screen pixel dimensions.
+    screen: dict[str, Any] | None = None
+
+
+class ScrapeStartRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    title: str = ""
+    # Capture region, in physical screenshot pixels.
+    region_left: int = 0
+    region_top: int = 0
+    region_width: int = Field(gt=0)
+    region_height: int = Field(gt=0)
+    # Where to send the mouse click between captures, in physical pixels.
+    click_x: int
+    click_y: int
+    pause_seconds: float = 0.2
+    max_pages: int = 500
+    # Fraction of pixel difference below which two captures count as "unchanged".
+    change_threshold: float = 0.01
+
+
+class ScrapeJobOut(BaseModel):
+    id: str
+    project_id: str
+    source_id: str | None = None
+    title: str
+    status: str
+    config: dict[str, Any]
+    pages: int
+    text: str = ""
+    error: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None

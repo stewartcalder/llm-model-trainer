@@ -169,3 +169,47 @@ export interface RunPodStatus {
   endpoint_id: string;
   health: Record<string, unknown>;
 }
+
+export interface ScreenSize {
+  physical_width: number;
+  physical_height: number;
+  logical_width: number;
+  logical_height: number;
+  mon_left: number;
+  mon_top: number;
+}
+
+export interface ScreenScraperStatus {
+  available: boolean;
+  missing: string[];
+  detail: string;
+  screen: ScreenSize | null;
+}
+
+export interface ScrapeStartRequest {
+  project_id: string;
+  title: string;
+  region_left: number;
+  region_top: number;
+  region_width: number;
+  region_height: number;
+  click_x: number;
+  click_y: number;
+  pause_seconds: number;
+  max_pages: number;
+  change_threshold: number;
+}
+
+export interface ScrapeJob {
+  id: string;
+  project_id: string;
+  source_id: string | null;
+  title: string;
+  status: string;
+  config: Partial<ScrapeStartRequest>;
+  pages: number;
+  text: string;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
+}
