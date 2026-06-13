@@ -120,12 +120,51 @@ def availability() -> dict:
                       "with a graphical display (not headless).",
             "screen": None,
         }
+
+    # Reading monitor geometry can succeed where actually grabbing pixels fails
+    # (e.g. Wayland/WSLg/headless-with-stub-X). Verify a real, full-frame grab so
+    # the tool doesn't advertise itself as usable and then hand back broken or
+    # all-black frames.
+    try:
+        probe = _grab_region(screen["mon_left"], screen["mon_top"],
+                             screen["physical_width"], screen["physical_height"])
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "available": False,
+            "missing": ["display (screen grab failed)"],
+            "detail": "The screen geometry is readable but pixels can't be captured "
+                      f"on this host: {exc}",
+            "screen": None,
+        }
+    if _is_blank(probe):
+        return {
+            "available": False,
+            "missing": ["display (blank capture)"],
+            "detail": _BLANK_FRAME_MSG,
+            "screen": None,
+        }
+
     return {"available": True, "missing": [], "detail": detail, "screen": screen}
 
 
 # ---------------------------------------------------------------------------
 # Low-level capture / OCR / click primitives (blocking — call via to_thread)
 # ---------------------------------------------------------------------------
+
+_BLANK_FRAME_MSG = (
+    "Screen capture returned a blank (all-black) frame. This usually means the "
+    "backend is running under WSL2/WSLg or a headless/Wayland session, where the "
+    "X11 root window has no desktop content to grab. Run the backend on the machine "
+    "that owns the display — native Windows, or a Linux X11 desktop — so it can see "
+    "the screen and the app you want to scrape."
+)
+
+
+def _is_blank(img) -> bool:
+    """True if the frame is entirely black (every channel min==max==0), the signature
+    of a contentless grab under WSLg/Wayland/headless X."""
+    return all(hi == 0 for _lo, hi in img.getextrema())
+
 
 def _grab_region(left: int, top: int, width: int, height: int):
     """Capture a screen region and return a PIL RGB Image (physical pixels)."""
@@ -144,6 +183,8 @@ def grab_full_screen_png() -> bytes:
         raise RuntimeError("No capturable screen available.")
     img = _grab_region(dims["mon_left"], dims["mon_top"],
                        dims["physical_width"], dims["physical_height"])
+    if _is_blank(img):
+        raise RuntimeError(_BLANK_FRAME_MSG)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

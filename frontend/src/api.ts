@@ -113,7 +113,17 @@ export const api = {
 
   // Tools — screen-text-scraper
   scraperStatus: () => req<ScreenScraperStatus>("/tools/screen-scraper/status"),
-  scraperScreenshotUrl: () => `${BASE}/tools/screen-scraper/screenshot?t=${Date.now()}`,
+  // Fetch the screenshot as a blob so capture failures surface as a real error
+  // (the server returns a JSON {detail} on 503) instead of a silently-broken <img>.
+  scraperScreenshot: async (): Promise<Blob> => {
+    const res = await fetch(`${BASE}/tools/screen-scraper/screenshot?t=${Date.now()}`);
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    return res.blob();
+  },
   startScrape: (body: ScrapeStartRequest) =>
     req<ScrapeJob>("/tools/screen-scraper/start", { method: "POST", body: JSON.stringify(body) }),
   listScrapeJobs: (pid: string) =>

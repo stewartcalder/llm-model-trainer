@@ -61,11 +61,29 @@ export default function Tools({ project }: { project: Project }) {
   }, [activeJob, loadJobs, toast]);
 
   const capture = async () => {
-    await loadStatus();
-    setShotUrl(api.scraperScreenshotUrl());
-    setClick(null);
-    setRegion(null);
+    setBusy(true);
+    try {
+      // Fetch the bytes first so a failed capture surfaces the server's reason
+      // instead of leaving an empty box behind a broken <img>.
+      const blob = await api.scraperScreenshot();
+      setShotUrl((prev) => {
+        if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setClick(null);
+      setRegion(null);
+      loadStatus();
+    } catch (e) {
+      toast((e as Error).message || "Could not capture the screen.", true);
+    } finally {
+      setBusy(false);
+    }
   };
+
+  // Release the last object URL when the component unmounts.
+  useEffect(() => () => {
+    setShotUrl((prev) => { if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev); return prev; });
+  }, []);
 
   // Map a mouse event to physical screenshot pixels.
   const toPhysical = (e: React.MouseEvent): Point => {
@@ -161,8 +179,8 @@ export default function Tools({ project }: { project: Project }) {
 
         {/* Step 1 — capture the screen */}
         <div className="row" style={{ gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-          <button className="btn" onClick={capture} disabled={status ? !status.available : true}>
-            {shotUrl ? "Recapture screen" : "Capture screen"}
+          <button className="btn" onClick={capture} disabled={busy || (status ? !status.available : true)}>
+            {busy ? "Capturing…" : shotUrl ? "Recapture screen" : "Capture screen"}
           </button>
           {shotUrl && (
             <>
@@ -193,6 +211,7 @@ export default function Tools({ project }: { project: Project }) {
               onMouseDown={onDown}
               onMouseMove={onMove}
               onMouseUp={onUp}
+              onError={() => toast("The captured image could not be displayed.", true)}
               style={{ cursor: mode === "click" ? "crosshair" : "cell" }}
             />
             {region && (
