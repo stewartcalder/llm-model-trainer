@@ -180,7 +180,11 @@ export default function Training({ project, stats }: { project: Project; stats: 
   const start = async () => {
     const effectiveCfg: TrainingConfig = {
       ...cfg,
-      base_model: isCustom ? customModel : cfg.base_model,
+      // RunPod binds its input straight to cfg.base_model; the customModel
+      // indirection only applies to the local Ollama-model picker.
+      base_model: provider === "runpod"
+        ? cfg.base_model
+        : (isCustom ? customModel : cfg.base_model),
     };
     if (!effectiveCfg.base_model.trim()) {
       toast("Enter a base model ID.", true); return;
@@ -319,28 +323,28 @@ export default function Training({ project, stats }: { project: Project; stats: 
             )}
           </Section>
 
-          {/* Local-only: GGUF export + Ollama */}
-          {provider === "local" && (
-            <Section title="Ollama export">
-              <label className="field">
-                <span>GGUF quantisation</span>
-                <select value={cfg.gguf_quantization}
-                  onChange={e => setCfg(c => ({ ...c, gguf_quantization: e.target.value }))}>
-                  {GGUF_QUANTS.map(q => <option key={q.id} value={q.id}>{q.label}</option>)}
-                </select>
-              </label>
-              <label className="field">
-                <span>Ollama model name</span>
-                <input type="text" value={cfg.ollama_model_name}
-                  onChange={e => setCfg(c => ({ ...c, ollama_model_name: e.target.value }))}
-                  placeholder="my-expert:latest" />
-                <span className="muted" style={{ fontSize: 11, marginTop: 4, display: "block" }}>
-                  After training, runs: <code>ollama create {cfg.ollama_model_name || "<name>"} -f Modelfile</code>.
-                  Leave blank to skip Ollama registration and just download the GGUF.
-                </span>
-              </label>
-            </Section>
-          )}
+          {/* GGUF export + Ollama registration — used by both local and RunPod */}
+          <Section title="Ollama export">
+            <label className="field">
+              <span>GGUF quantisation</span>
+              <select value={cfg.gguf_quantization}
+                onChange={e => setCfg(c => ({ ...c, gguf_quantization: e.target.value }))}>
+                {GGUF_QUANTS.map(q => <option key={q.id} value={q.id}>{q.label}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>Ollama model name</span>
+              <input type="text" value={cfg.ollama_model_name}
+                onChange={e => setCfg(c => ({ ...c, ollama_model_name: e.target.value }))}
+                placeholder="my-expert:latest" />
+              <span className="muted" style={{ fontSize: 11, marginTop: 4, display: "block" }}>
+                {provider === "runpod"
+                  ? <>The RunPod worker exports the GGUF, then the app downloads it and runs <code>ollama create {cfg.ollama_model_name || "<name>"}</code> on import.</>
+                  : <>After training, runs: <code>ollama create {cfg.ollama_model_name || "<name>"} -f Modelfile</code>.</>}
+                {" "}Leave blank to skip Ollama registration and just download the GGUF.
+              </span>
+            </label>
+          </Section>
 
           {/* Dataset */}
           <Section title="Dataset">

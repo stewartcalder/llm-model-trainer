@@ -29,6 +29,9 @@ openai==1.59.6
 # Sync DB driver — used by the local training thread (asyncpg is async-only)
 psycopg2-binary==2.9.10
 
+# HuggingFace Hub — download the worker's GGUF for the RunPod → Ollama import step
+huggingface_hub
+
 # Screen-text-scraper tool (Tools tab) — install separately if you want it.
 # Needs a graphical display + the tesseract OCR engine on the backend host:
 #   sudo apt-get install -y tesseract-ocr        # or: brew install tesseract
