@@ -27,6 +27,7 @@ const DEFAULT_CFG: TrainingConfig = {
   include_statuses: ["approved"],
   gguf_quantization: "q4_k_m",
   ollama_model_name: "",
+  delete_hf_after_import: false,
 };
 
 // "importing" = RunPod finished; backend is downloading the GGUF + running
@@ -344,6 +345,13 @@ export default function Training({ project, stats }: { project: Project; stats: 
                 {" "}Leave blank to skip Ollama registration and just download the GGUF.
               </span>
             </label>
+            {provider === "runpod" && (
+              <label className="checkbox" style={{ marginTop: 4 }}>
+                <input type="checkbox" checked={cfg.delete_hf_after_import}
+                  onChange={e => setCfg(c => ({ ...c, delete_hf_after_import: e.target.checked }))} />
+                Delete the GGUF from HuggingFace after importing to Ollama (frees ~8 GB; the small LoRA adapter is kept)
+              </label>
+            )}
           </Section>
 
           {/* Dataset */}
@@ -407,8 +415,14 @@ export default function Training({ project, stats }: { project: Project; stats: 
             <label className="checkbox" style={{ marginTop: 4 }}>
               <input type="checkbox" checked={cfg.use_4bit}
                 onChange={e => setCfg(c => ({ ...c, use_4bit: e.target.checked }))} />
-              4-bit quantisation (QLoRA) — recommended for GPUs with &lt;24 GB VRAM
+              4-bit quantisation (QLoRA) — required for 7B+ models unless you have an 80 GB GPU
             </label>
+            {!cfg.use_4bit && (
+              <span className="muted" style={{ fontSize: 11, display: "block" }}>
+                ⚠ Off = full fp16 weights (a 14B model is ~28 GB before training overhead),
+                which will out-of-memory on a 24–48 GB GPU. Leave on unless you know the model fits.
+              </span>
+            )}
           </Section>
 
           {/* Training hypers */}

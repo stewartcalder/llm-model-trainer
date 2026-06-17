@@ -132,9 +132,11 @@ export interface TrainingConfig {
   use_4bit: boolean;
   dataset_format: string;
   include_statuses: string[];
-  // Local-only
+  // GGUF / Ollama (both providers)
   gguf_quantization: string;
   ollama_model_name: string;
+  // RunPod-only: delete the worker's GGUF from HF after importing it into Ollama
+  delete_hf_after_import: boolean;
 }
 
 export interface OllamaModelInfo {

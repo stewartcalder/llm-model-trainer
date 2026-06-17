@@ -339,9 +339,9 @@ def _launch_bg(coro) -> None:
 def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict):
     """Map RunPod status onto the job and handle the returned output.
 
-    Returns an import spec tuple (repo_id, gguf_filename, ollama_name) when the
-    worker produced a GGUF that should be downloaded + registered with Ollama in
-    the background; otherwise None.
+    Returns an import spec tuple (repo_id, gguf_filename, ollama_name, delete_hf)
+    when the worker produced a GGUF that should be downloaded + registered with
+    Ollama in the background; otherwise None.
     """
     status_map = {
         "IN_QUEUE": "queued", "IN_PROGRESS": "running",
@@ -365,8 +365,10 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict):
             job.status = "importing"
             job.log += (f"\n[{_now().isoformat()}] GGUF ready in '{output['gguf_repo']}' — "
                         f"downloading and registering with Ollama…")
+            _cfg = json.loads(job.config_json or "{}")
             import_spec = (output["gguf_repo"], output["gguf_filename"],
-                           output.get("ollama_model_name") or "")
+                           output.get("ollama_model_name") or "",
+                           bool(_cfg.get("delete_hf_after_import")))
 
         elif new_status == "completed" and output.get("adapter_repo"):
             # Adapter-only result (GGUF export disabled/failed). Download inline —
@@ -398,17 +400,33 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict):
     return import_spec
 
 
-async def _import_runpod_gguf(job_id: str, repo_id: str, gguf_filename: str, ollama_name: str) -> None:
+async def _import_runpod_gguf(job_id: str, repo_id: str, gguf_filename: str,
+                              ollama_name: str, delete_hf: bool = False) -> None:
     """Download the worker's GGUF from HF and register it with local Ollama.
 
     Runs the blocking download + `ollama create` in a thread and writes status
     via psycopg2 (same pattern as local training), so the event loop is free.
     """
     import asyncio
-    await asyncio.to_thread(_import_runpod_gguf_blocking, job_id, repo_id, gguf_filename, ollama_name)
+    await asyncio.to_thread(_import_runpod_gguf_blocking, job_id, repo_id,
+                            gguf_filename, ollama_name, delete_hf)
 
 
-def _import_runpod_gguf_blocking(job_id: str, repo_id: str, gguf_filename: str, ollama_name: str) -> None:
+def _delete_hf_gguf(repo_id: str, gguf_filename: str, log) -> None:
+    """Delete just the GGUF from the worker's HF repo, keeping the LoRA adapter."""
+    try:
+        from huggingface_hub import HfApi
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+        HfApi(token=token).delete_file(
+            path_in_repo=gguf_filename, repo_id=repo_id, repo_type="model",
+            commit_message="Remove GGUF after import to Ollama (auto-cleanup)")
+        log(f"Deleted '{gguf_filename}' from HF repo '{repo_id}' (adapter kept).")
+    except Exception as exc:  # noqa: BLE001 — cleanup is best-effort, never fail the job
+        log(f"HF cleanup skipped — could not delete '{gguf_filename}' from '{repo_id}': {exc}")
+
+
+def _import_runpod_gguf_blocking(job_id: str, repo_id: str, gguf_filename: str,
+                                 ollama_name: str, delete_hf: bool = False) -> None:
     import subprocess
     from ..local_trainer import _update_job  # psycopg2-based, thread-safe
 
@@ -432,10 +450,16 @@ def _import_runpod_gguf_blocking(job_id: str, repo_id: str, gguf_filename: str, 
                                   capture_output=True, text=True, timeout=900)
             if proc.returncode != 0:
                 raise RuntimeError(f"ollama create failed: {proc.stderr.strip()}")
+            # Model is safely local now — optionally reclaim HF storage.
+            if delete_hf:
+                _delete_hf_gguf(repo_id, gguf_filename, _log)
             _update_job(job_id, status="completed", model_path=str(out_dir), finished=True,
                         log_append=f"\n[{_now().isoformat()}] Ollama model '{ollama_name}' is ready — "
                                    f"try: ollama run {ollama_name}")
         else:
+            # Downloaded to disk but not registered; still local, so honour cleanup.
+            if delete_hf:
+                _delete_hf_gguf(repo_id, gguf_filename, _log)
             _update_job(job_id, status="completed", model_path=str(out_dir), finished=True,
                         log_append=f"\n[{_now().isoformat()}] GGUF downloaded to {out_dir} "
                                    f"(no Ollama name set).")

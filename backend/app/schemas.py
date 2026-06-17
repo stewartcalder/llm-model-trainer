@@ -164,6 +164,9 @@ class TrainingConfig(BaseModel):
     # now exports the GGUF on the GPU and the backend runs `ollama create`).
     gguf_quantization: str = "q4_k_m"           # q4_k_m | q5_k_m | q8_0 | f16
     ollama_model_name: str = ""                  # name to register in local Ollama
+    # RunPod-only: after the GGUF is downloaded and registered with Ollama, delete
+    # it from the worker's HF repo to reclaim storage (the small adapter is kept).
+    delete_hf_after_import: bool = False
 
 
 class LocalStatusOut(BaseModel):
