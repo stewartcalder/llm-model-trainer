@@ -1,6 +1,7 @@
 """FastAPI application entrypoint."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,7 +24,16 @@ FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    yield
+    # Resume any import interrupted by a previous restart, then start the
+    # server-side RunPod poller so completed jobs reach Ollama even when no
+    # browser tab is open to drive the polling.
+    from .routers.training import reconcile_runpod_jobs, _recover_stuck_imports
+    await _recover_stuck_imports()
+    reconciler = asyncio.create_task(reconcile_runpod_jobs())
+    try:
+        yield
+    finally:
+        reconciler.cancel()
 
 
 app = FastAPI(title="LoRA Training Data Builder", version=__version__, lifespan=lifespan)

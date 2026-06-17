@@ -503,7 +503,12 @@ export default function Training({ project, stats }: { project: Project; stats: 
                 </div>
               )}
 
-              {activeJob.status === "completed" && activeJob.config.ollama_model_name && (
+              {/* Only claim Ollama availability when the import actually ran —
+                  both the local and RunPod success paths log this exact marker.
+                  A bare "completed" can be an adapter-only or expired-output run
+                  that never reached Ollama. */}
+              {activeJob.status === "completed" && activeJob.config.ollama_model_name &&
+                activeJob.log.includes("is ready — try: ollama run") && (
                 <div className="badge green" style={{ marginBottom: 10, display: "inline-block" }}>
                   ✓ Available in Ollama as &ldquo;{activeJob.config.ollama_model_name}&rdquo;
                 </div>

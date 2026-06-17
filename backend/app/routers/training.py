@@ -15,11 +15,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import models, schemas
 from ..config import EXPORT_DIR
-from ..database import get_session
+from ..database import SessionLocal, get_session
 from ..runpod_client import cancel_job, health_check, job_status, list_gpu_types, submit_job
 from ..serialize import load_json
 
 router = APIRouter(prefix="/api/projects/{project_id}/training", tags=["training"])
+
+# RunPod statuses that mean the job is still in flight and worth polling. A job
+# in any of these is re-polled by both the status endpoint and the background
+# reconciler; once it leaves this set it is terminal and never polled again.
+_RUNPOD_ACTIVE = ("queued", "running", "IN_QUEUE", "IN_PROGRESS")
 
 
 def _now() -> datetime:
@@ -307,22 +312,32 @@ async def get_job(project_id: str, job_id: str, db: AsyncSession = Depends(get_s
         raise HTTPException(404, "Training job not found")
 
     # Only poll RunPod for RunPod jobs that are still active.
-    if job.runpod_job_id and job.status in ("queued", "running", "IN_QUEUE", "IN_PROGRESS"):
-        try:
-            rp = await job_status(job.runpod_job_id)
-            import_spec = _sync_runpod_status(job, (rp.get("status") or "").upper(), rp)
-            await db.commit()
-            await db.refresh(job)
-            # Heavy GGUF download + `ollama create` runs in a background thread so
-            # it never blocks this poll request. The job sits in "importing" until
-            # the thread flips it to completed/failed via its own (psycopg2) writes.
-            if import_spec is not None:
-                _launch_bg(_import_runpod_gguf(job.id, *import_spec))
-        except Exception as exc:  # noqa: BLE001
-            job.log += f"\n[{_now().isoformat()}] Status poll error: {exc}"
-            await db.commit()
-
+    await _poll_runpod_job(job, db)
     return _job_out(job)
+
+
+async def _poll_runpod_job(job: models.TrainingJob, db: AsyncSession) -> None:
+    """Poll RunPod once for an in-flight job, sync status, and launch the GGUF
+    import in the background if one is ready.
+
+    Shared by the per-request status endpoint and the background reconciler so
+    completion is processed identically whether or not a browser is watching.
+    """
+    if not (job.runpod_job_id and job.status in _RUNPOD_ACTIVE):
+        return
+    try:
+        rp = await job_status(job.runpod_job_id)
+        import_spec = _sync_runpod_status(job, (rp.get("status") or "").upper(), rp)
+        await db.commit()
+        await db.refresh(job)
+        # Heavy GGUF download + `ollama create` runs in a background thread so
+        # it never blocks this poll. The job sits in "importing" until the
+        # thread flips it to completed/failed via its own (psycopg2) writes.
+        if import_spec is not None:
+            _launch_bg(_import_runpod_gguf(job.id, *import_spec))
+    except Exception as exc:  # noqa: BLE001
+        job.log += f"\n[{_now().isoformat()}] Status poll error: {exc}"
+        await db.commit()
 
 
 # Keep references to background import tasks so they are not garbage-collected.
@@ -330,10 +345,81 @@ _bg_tasks: set = set()
 
 
 def _launch_bg(coro) -> None:
-    import asyncio
     task = asyncio.create_task(coro)
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
+
+
+# ── Background reconciliation ────────────────────────────────────────────────
+# The frontend only polls while its tab is open, and RunPod's serverless output
+# has a short TTL. Without a server-side poller, a job that finishes while no
+# browser is watching has its output expire and the trained model is silently
+# dropped — never reaching Ollama. These run for the lifetime of the process.
+
+async def reconcile_runpod_jobs(interval_seconds: int = 45) -> None:
+    """Poll every in-flight RunPod job on a fixed interval, independent of any
+    browser, so completion is always processed before the output expires."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            async with SessionLocal() as db:
+                result = await db.execute(
+                    select(models.TrainingJob).where(
+                        models.TrainingJob.runpod_job_id.is_not(None),
+                        models.TrainingJob.status.in_(_RUNPOD_ACTIVE),
+                    )
+                )
+                for job in result.scalars().all():
+                    await _poll_runpod_job(job, db)
+        except Exception:  # noqa: BLE001 — never let the reconcile loop die
+            pass
+
+
+async def _recover_stuck_imports() -> None:
+    """Re-launch GGUF imports for jobs left in 'importing' by a previous process.
+
+    The import runs in a thread that does not survive a backend restart, so a
+    job interrupted mid-import would otherwise hang in 'importing' forever. The
+    download + `ollama create` is idempotent, so re-running is safe.
+    """
+    try:
+        async with SessionLocal() as db:
+            result = await db.execute(
+                select(models.TrainingJob).where(models.TrainingJob.status == "importing")
+            )
+            for job in result.scalars().all():
+                spec = _recover_import_spec(job)
+                if spec is None:
+                    continue
+                job.log += (f"\n[{_now().isoformat()}] Backend restarted mid-import; "
+                            f"resuming GGUF import from '{spec[0]}'…")
+                await db.commit()
+                _launch_bg(_import_runpod_gguf(job.id, *spec))
+    except Exception:  # noqa: BLE001 — best-effort startup recovery
+        pass
+
+
+def _recover_import_spec(job: models.TrainingJob) -> tuple[str, str, str, bool] | None:
+    """Reconstruct the GGUF import parameters from the job config + environment.
+
+    Used when RunPod's `output` has expired (short serverless TTL) before any
+    poll observed it. The worker uploads the GGUF to a *deterministic* location
+    (see runpod_worker/handler.py):
+
+        repo     = config.hf_upload_repo or $HF_UPLOAD_REPO
+        filename = model-<gguf_quantization>.gguf
+
+    so the import can proceed without the worker's output. Returns the same
+    spec shape as the live path, or None when no upload repo can be determined.
+    """
+    cfg = json.loads(job.config_json or "{}")
+    repo = (cfg.get("hf_upload_repo") or os.environ.get("HF_UPLOAD_REPO") or "").strip()
+    if not repo:
+        return None
+    quant = (cfg.get("gguf_quantization") or "q4_k_m")
+    gguf_filename = f"model-{quant}.gguf"
+    return (repo, gguf_filename, cfg.get("ollama_model_name") or "",
+            bool(cfg.get("delete_hf_after_import")))
 
 
 def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict):
@@ -353,47 +439,69 @@ def _sync_runpod_status(job: models.TrainingJob, rp_status: str, rp: dict):
         job.log += f"\n[{_now().isoformat()}] Status → {new_status}"
         job.status = new_status
 
-    output = rp.get("output") or {}
+    output = rp.get("output")
+    if not isinstance(output, dict):
+        output = {}
     import_spec = None
-    if isinstance(output, dict):
-        if output.get("log"):
-            job.log += f"\n{output['log']}"
 
-        if new_status == "completed" and output.get("gguf_repo"):
-            # Worker exported a GGUF and uploaded it. Defer the (large) download
-            # and `ollama create` to a background thread; mark as importing.
-            job.status = "importing"
-            job.log += (f"\n[{_now().isoformat()}] GGUF ready in '{output['gguf_repo']}' — "
-                        f"downloading and registering with Ollama…")
-            _cfg = json.loads(job.config_json or "{}")
-            import_spec = (output["gguf_repo"], output["gguf_filename"],
-                           output.get("ollama_model_name") or "",
-                           bool(_cfg.get("delete_hf_after_import")))
+    if output.get("log"):
+        job.log += f"\n{output['log']}"
 
-        elif new_status == "completed" and output.get("adapter_repo"):
-            # Adapter-only result (GGUF export disabled/failed). Download inline —
-            # adapter files are small. Model is NOT auto-registered in Ollama.
-            out_dir = Path(EXPORT_DIR) / "models" / job.id
-            out_dir.mkdir(parents=True, exist_ok=True)
-            repo_id = output["adapter_repo"]
-            try:
-                from huggingface_hub import snapshot_download
-                token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
-                snapshot_download(repo_id=repo_id, repo_type="model",
-                                  local_dir=str(out_dir), token=token)
-                job.model_path = str(out_dir)
-                job.log += f"\n[{_now().isoformat()}] Adapter downloaded from '{repo_id}' → {out_dir}"
-            except Exception as exc:  # noqa: BLE001
-                job.log += (f"\n[{_now().isoformat()}] Adapter is in '{repo_id}' but download "
-                            f"failed: {exc}. Set HF_TOKEN in backend/.env to fetch it.")
+    if new_status == "completed" and output.get("gguf_repo"):
+        # Worker exported a GGUF and uploaded it. Defer the (large) download
+        # and `ollama create` to a background thread; mark as importing.
+        job.status = "importing"
+        job.log += (f"\n[{_now().isoformat()}] GGUF ready in '{output['gguf_repo']}' — "
+                    f"downloading and registering with Ollama…")
+        _cfg = json.loads(job.config_json or "{}")
+        import_spec = (output["gguf_repo"], output["gguf_filename"],
+                       output.get("ollama_model_name") or "",
+                       bool(_cfg.get("delete_hf_after_import")))
 
-        elif new_status == "completed" and output.get("model_files"):
-            out_dir = Path(EXPORT_DIR) / "models" / job.id
-            out_dir.mkdir(parents=True, exist_ok=True)
-            for fname, b64_content in output["model_files"].items():
-                (out_dir / fname).write_bytes(base64.b64decode(b64_content))
+    elif new_status == "completed" and output.get("adapter_repo"):
+        # Adapter-only result (GGUF export disabled/failed). Download inline —
+        # adapter files are small. Model is NOT auto-registered in Ollama.
+        out_dir = Path(EXPORT_DIR) / "models" / job.id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        repo_id = output["adapter_repo"]
+        try:
+            from huggingface_hub import snapshot_download
+            token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+            snapshot_download(repo_id=repo_id, repo_type="model",
+                              local_dir=str(out_dir), token=token)
             job.model_path = str(out_dir)
-            job.log += f"\n[{_now().isoformat()}] Adapter saved to {out_dir}"
+            job.log += f"\n[{_now().isoformat()}] Adapter downloaded from '{repo_id}' → {out_dir}"
+        except Exception as exc:  # noqa: BLE001
+            job.log += (f"\n[{_now().isoformat()}] Adapter is in '{repo_id}' but download "
+                        f"failed: {exc}. Set HF_TOKEN in backend/.env to fetch it.")
+
+    elif new_status == "completed" and output.get("model_files"):
+        out_dir = Path(EXPORT_DIR) / "models" / job.id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for fname, b64_content in output["model_files"].items():
+            (out_dir / fname).write_bytes(base64.b64decode(b64_content))
+        job.model_path = str(out_dir)
+        job.log += f"\n[{_now().isoformat()}] Adapter saved to {out_dir}"
+
+    elif new_status == "completed":
+        # COMPLETED but the worker returned no usable output. This is almost
+        # always RunPod's serverless output TTL expiring before any poll saw it
+        # (the bug that silently dropped trained models). Rather than mark a
+        # model-less "success", recover the GGUF deterministically from the HF
+        # repo; the bg import marks the job failed with a clear message if the
+        # file is genuinely absent (e.g. the worker's GGUF export had failed).
+        spec = _recover_import_spec(job)
+        if spec is not None:
+            job.status = "importing"
+            job.log += (f"\n[{_now().isoformat()}] RunPod output unavailable (expired). "
+                        f"Recovering GGUF from HF repo '{spec[0]}' ({spec[1]})…")
+            import_spec = spec
+        else:
+            job.status = "failed"
+            job.log += (f"\n[{_now().isoformat()}] RunPod reported completed but returned no "
+                        f"output, and no HF upload repo is configured to recover from — the "
+                        f"trained model could not be retrieved. Re-run training (set "
+                        f"HF_UPLOAD_REPO so future runs can auto-recover).")
 
     if job.status in ("completed", "failed", "cancelled") and not job.finished_at:
         job.finished_at = _now()

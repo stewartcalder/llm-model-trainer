@@ -164,15 +164,23 @@ def _export_gguf(cfg: dict, adapter_dir: str, work_dir: str) -> str:
     merged_dir = os.path.join(work_dir, "merged")
     os.makedirs(merged_dir, exist_ok=True)
 
-    print(f"[gguf] reloading base {base_model} in fp16 and merging adapter…")
+    # Merge on the CPU, not the GPU. Reloading a fp16 base (~28 GB for a 14B)
+    # onto the GPU via device_map="auto" can exceed VRAM and get the worker
+    # OOM-killed mid-export — which returns *no output at all* (the failure that
+    # silently lost a trained model). merge_and_unload is pure weight arithmetic
+    # (no matmul), so CPU RAM — usually far larger than VRAM — does it safely,
+    # and the convert/quantise steps below are CPU-only regardless.
+    print(f"[gguf] reloading base {base_model} in fp16 on CPU and merging adapter…")
     base = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True,
+        base_model, torch_dtype=torch.float16, device_map="cpu",
+        low_cpu_mem_usage=True, trust_remote_code=True,
     )
     merged = PeftModel.from_pretrained(base, adapter_dir).merge_and_unload()
     merged.save_pretrained(merged_dir, safe_serialization=True, max_shard_size="5GB")
     AutoTokenizer.from_pretrained(base_model, trust_remote_code=True).save_pretrained(merged_dir)
     del merged, base
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # Free the base model from the HF cache to reclaim ~disk before conversion.
     try:
@@ -206,8 +214,26 @@ def _export_gguf(cfg: dict, adapter_dir: str, work_dir: str) -> str:
     return out_gguf
 
 
+def _stream(event: dict, data: dict) -> None:
+    """Best-effort partial-output update.
+
+    Pushes the result built so far onto the RunPod job so it is retrievable via
+    /status even while the job is still running. If a later step (e.g. the heavy
+    GGUF export) OOM-kills or times out the worker before it can return, the
+    streamed payload — crucially `adapter_repo` — survives, so the backend can
+    still recover the adapter instead of seeing an empty output.
+    """
+    try:
+        runpod.serverless.progress_update(event, data)
+    except Exception as exc:  # noqa: BLE001 — streaming is best-effort, never fatal
+        print(f"[handler] progress_update skipped: {exc}", file=sys.stderr)
+
+
 def handler(event: dict) -> dict:
     job_input = event.get("input", {})
+    # Built incrementally so the outer error handler can still return whatever
+    # was produced before a failure (notably the uploaded adapter pointer).
+    result: dict = {}
     try:
         dataset_b64 = job_input["dataset_b64"]
         cfg = job_input.get("config", {})
@@ -232,10 +258,13 @@ def handler(event: dict) -> dict:
         ) / (1024 * 1024)
         print(f"[handler] adapter size: {adapter_mb:.1f} MB")
 
-        result: dict = {"log": log, "adapter_size_mb": round(adapter_mb, 1)}
+        result["log"] = log
+        result["adapter_size_mb"] = round(adapter_mb, 1)
 
-        # ── Upload the adapter (always — cheap insurance so a GGUF failure does
-        #    not waste the training run). Needs HF token + repo. ──────────────
+        # ── Upload the adapter FIRST — before the heavy GGUF export — as cheap
+        #    insurance. If the export later fails or kills the worker, the
+        #    adapter is already safe in HF and has been streamed back so the
+        #    training run is never wasted. Needs HF token + repo. ─────────────
         api = None
         if hf_token and hf_repo:
             from huggingface_hub import HfApi
@@ -245,10 +274,14 @@ def handler(event: dict) -> dict:
             api.upload_folder(folder_path=output_dir, repo_id=hf_repo, repo_type="model",
                               path_in_repo="adapter", commit_message="LoRA adapter (RunPod)")
             result["adapter_repo"] = hf_repo
+            # Make adapter_repo retrievable even if the GGUF step kills the worker.
+            _stream(event, result)
 
         # ── GGUF export on the GPU, then upload the .gguf (default on). ───────
         # The backend downloads the .gguf and runs `ollama create` locally, so a
-        # RunPod run lands in Ollama exactly like a local build.
+        # RunPod run lands in Ollama exactly like a local build. A failure here
+        # is non-fatal: the adapter result above is still returned, so a 14B /
+        # q8_0 export that can't fit still yields a usable adapter.
         if cfg.get("export_gguf", True) and api is not None:
             try:
                 gguf_path = _export_gguf(cfg, output_dir, output_dir)
@@ -289,7 +322,11 @@ def handler(event: dict) -> dict:
     except Exception as exc:
         tb = traceback.format_exc()
         print(f"[handler] ERROR:\n{tb}", file=sys.stderr)
-        return {"error": str(exc), "traceback": tb}
+        # Preserve any partial result (e.g. a successfully uploaded adapter_repo)
+        # so a failure after the adapter upload still returns a usable pointer.
+        result["error"] = str(exc)
+        result["traceback"] = tb
+        return result
 
 
 runpod.serverless.start({"handler": handler})
