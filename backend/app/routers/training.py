@@ -536,7 +536,8 @@ def _delete_hf_gguf(repo_id: str, gguf_filename: str, log) -> None:
 def _import_runpod_gguf_blocking(job_id: str, repo_id: str, gguf_filename: str,
                                  ollama_name: str, delete_hf: bool = False) -> None:
     import subprocess
-    from ..local_trainer import _update_job  # psycopg2-based, thread-safe
+    # psycopg2-based, thread-safe helpers reused from the local trainer.
+    from ..local_trainer import _update_job, build_modelfile, _job_dataset_format
 
     def _log(msg: str) -> None:
         _update_job(job_id, log_append=f"\n[{_now().isoformat()}] {msg}")
@@ -552,7 +553,7 @@ def _import_runpod_gguf_blocking(job_id: str, repo_id: str, gguf_filename: str,
 
         if ollama_name:
             modelfile = out_dir / "Modelfile"
-            modelfile.write_text(f"FROM {Path(gguf_path).absolute()}\n")
+            modelfile.write_text(build_modelfile(gguf_path, _job_dataset_format(job_id)))
             _log(f"Running: ollama create {ollama_name}")
             proc = subprocess.run(["ollama", "create", ollama_name, "-f", str(modelfile)],
                                   capture_output=True, text=True, timeout=900)

@@ -135,6 +135,63 @@ def _format_row(row: dict, fmt: str) -> str:
     return "\n".join(parts)
 
 
+# ── Ollama Modelfile generation ──────────────────────────────────────────────
+
+def build_modelfile(gguf_path, dataset_format: str | None) -> str:
+    """Build an Ollama Modelfile whose prompt template mirrors the text format
+    the model was fine-tuned on (see _format_row above / the RunPod worker's
+    _fmt_* helpers).
+
+    Without this, `ollama create` with a bare ``FROM`` falls back to a
+    passthrough ``{{ .Prompt }}`` template: the model never sees its training
+    framing (so it ignores the instruction format) and has nothing to stop on
+    (so it runs to the token limit). Matching the template to the training
+    format fixes both, and the stop tokens are belt-and-braces against a model
+    that tries to continue into the next turn.
+    """
+    fmt = (dataset_format or "alpaca").lower()
+    from_line = f"FROM {Path(gguf_path).absolute()}\n"
+
+    if fmt == "sharegpt":
+        template = (
+            "{{ if .System }}<system> {{ .System }} </system>\n{{ end }}"
+            "<human> {{ .Prompt }} </human>\n<gpt> {{ .Response }} </gpt>"
+        )
+        stops = ["</gpt>", "<human>"]
+    elif fmt == "openai":
+        template = (
+            "{{ if .System }}[system] {{ .System }}\n{{ end }}"
+            "[user] {{ .Prompt }}\n[assistant] {{ .Response }}"
+        )
+        stops = ["[user]", "[system]"]
+    else:  # alpaca (default)
+        template = (
+            "{{ if .System }}{{ .System }}\n\n{{ end }}"
+            "### Instruction:\n{{ .Prompt }}\n### Response:\n{{ .Response }}"
+        )
+        stops = ["### Instruction:", "### Input:"]
+
+    lines = [from_line, f'TEMPLATE """{template}"""\n']
+    lines += [f'PARAMETER stop "{s}"\n' for s in stops]
+    return "".join(lines)
+
+
+def _job_dataset_format(job_id: str) -> str:
+    """Read a training job's dataset_format from the DB (for the RunPod import
+    path, which only has the job id, not the full config)."""
+    c = _conn()
+    try:
+        with c.cursor() as cur:
+            cur.execute("SELECT config_json FROM training_jobs WHERE id = %s", (job_id,))
+            row = cur.fetchone()
+    finally:
+        c.close()
+    try:
+        return (json.loads(row[0]).get("dataset_format") or "alpaca") if row and row[0] else "alpaca"
+    except Exception:  # noqa: BLE001
+        return "alpaca"
+
+
 # ── Training entry point ──────────────────────────────────────────────────────
 
 def run_local_training(job_id: str, dataset_jsonl: str, config: dict, export_dir: str) -> None:
@@ -421,7 +478,7 @@ def run_local_training(job_id: str, dataset_jsonl: str, config: dict, export_dir
         ollama_name = (config.get("ollama_model_name") or "").strip()
         if ollama_name:
             modelfile = gguf_out / "Modelfile"
-            modelfile.write_text(f"FROM {gguf_path.absolute()}\n")
+            modelfile.write_text(build_modelfile(gguf_path, config.get("dataset_format")))
             log(f"Running: ollama create {ollama_name}")
             proc = subprocess.run(
                 ["ollama", "create", ollama_name, "-f", str(modelfile)],
